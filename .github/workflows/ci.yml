@@ -5,11 +5,13 @@ on:
   pull_request:
 
 jobs:
+  # macOS is verified locally (mise run test); CI covers the platform-specific socket and
+  # gateway code of Linux and Windows.
   test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     env:
       LITENETLIB_SRC: ${{ github.workspace }}/LiteNetLib/LiteNetLib
@@ -23,18 +25,19 @@ jobs:
           repository: RevenantX/LiteNetLib
           ref: v0.8.3
           path: LiteNetLib
-      - uses: actions/setup-go@v5
+      - uses: jdx/mise-action@v2 # installs the [tools] of mise.toml
         with:
-          go-version-file: go-litenetlib/go.mod
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
+          working_directory: go-litenetlib
       - name: Make TEST-NET-3 unreachable (exercises HostUnreachable)
         if: runner.os == 'Linux'
         run: sudo ip route add unreachable 203.0.113.0/24
+      # The debug build only adds statistics and the network simulation, which are
+      # platform independent, so it runs on Linux alone.
+      - name: Test (release and debug builds)
+        if: runner.os == 'Linux'
+        working-directory: go-litenetlib
+        run: mise run test
       - name: Test (release build)
+        if: runner.os != 'Linux'
         working-directory: go-litenetlib
-        run: go test -race -count=1 -v ./...
-      - name: Test (debug build)
-        working-directory: go-litenetlib
-        run: go test -race -count=1 -tags debug -v ./...
+        run: mise run test:release
