@@ -1,0 +1,31 @@
+# Build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+
+# Test and profiling output
+*.test
+*.out
+*.prof
+coverage.*
+
+# Local workspace
+go.work
+go.work.sum
+
+# Local environment
+.env
+mise.local.toml
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Agent instructions
+AGENTS.md
