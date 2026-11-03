@@ -44,17 +44,18 @@ type Manager struct {
 	AutoRecycle bool
 	// NatPunchModule performs NAT hole punching.
 	NatPunchModule *NatPunchModule
-	// SimulatePacketLoss drops SimulationPacketLossChance percent of incoming datagrams
-	// (DEBUG-only in the reference).
+	// SimulatePacketLoss drops SimulationPacketLossChance percent of incoming datagrams.
+	// Like the reference, it only works in debug builds (-tags debug).
 	SimulatePacketLoss bool
 	// SimulateLatency holds incoming datagrams for SimulationMinLatency to
-	// SimulationMaxLatency milliseconds (DEBUG-only in the reference).
+	// SimulationMaxLatency milliseconds. It only works in debug builds (-tags debug).
 	SimulateLatency            bool
 	SimulationPacketLossChance int
 	SimulationMinLatency       int
 	SimulationMaxLatency       int
 
 	listener EventListener
+	pool     packetPool
 
 	runMu     sync.Mutex
 	running   atomic.Bool
@@ -340,8 +341,10 @@ func (m *Manager) sendRaw(data []byte, addr netip.AddrPort) (int, DisconnectReas
 		}
 		return 0, noDisconnect, nil
 	}
-	m.packetsSent.Add(1)
-	m.bytesSent.Add(uint64(len(data)))
+	if debugBuild {
+		m.packetsSent.Add(1)
+		m.bytesSent.Add(uint64(len(data)))
+	}
 	return n, noDisconnect, nil
 }
 
@@ -366,7 +369,7 @@ func (m *Manager) sendFailed(reason DisconnectReason, addr netip.AddrPort, err e
 
 func (m *Manager) sendAndRecycle(pk *packet, addr netip.AddrPort) int {
 	n := m.sendRawUnlocked(pk.data, addr)
-	recyclePacket(pk)
+	m.pool.recycle(pk)
 	return n
 }
 
@@ -447,7 +450,7 @@ func (m *Manager) sendUnconnected(prop packetProperty, data []byte, addr netip.A
 	if !m.running.Load() {
 		return false
 	}
-	return m.sendAndRecycle(getWithData(prop, data), addr) > 0
+	return m.sendAndRecycle(m.pool.getWithData(prop, data), addr) > 0
 }
 
 func (m *Manager) updateLogic() {
@@ -458,7 +461,7 @@ func (m *Manager) updateLogic() {
 	<-timer.C
 	last := time.Now()
 	for m.running.Load() {
-		if m.SimulateLatency {
+		if debugBuild && m.SimulateLatency {
 			m.releaseDelayed()
 		}
 		elapsed := int(time.Since(last).Milliseconds())
@@ -485,7 +488,9 @@ func (m *Manager) updateLogic() {
 			clear(toRemove)
 			toRemove = toRemove[:0]
 		}
-		m.packetLoss.Store(totalLoss)
+		if debugBuild {
+			m.packetLoss.Store(totalLoss)
+		}
 
 		sleep := m.UpdateTime - (int(time.Since(last).Milliseconds()) - elapsed)
 		last = time.Now()
@@ -521,7 +526,7 @@ func (m *Manager) receiveLoop(conn *net.UDPConn) {
 		if n > maxPacketSize {
 			continue // the reference drops oversized datagrams (MessageSize)
 		}
-		if m.simulate(buf[:n], addr) {
+		if debugBuild && m.simulate(buf[:n], addr) {
 			continue
 		}
 		m.dataReceived(buf[:n], addr)
@@ -534,12 +539,14 @@ func (m *Manager) dataReceived(data []byte, addr netip.AddrPort) {
 			writeError("[NM] SocketReceiveThread error: %v", e)
 		}
 	}()
-	m.packetsReceived.Add(1)
-	m.bytesReceived.Add(uint64(len(data)))
+	if debugBuild {
+		m.packetsReceived.Add(1)
+		m.bytesReceived.Add(uint64(len(data)))
+	}
 
-	pk := getPacket(len(data), false)
+	pk := m.pool.get(len(data), false)
 	if !pk.fromBytes(data) {
-		recyclePacket(pk)
+		m.pool.recycle(pk)
 		writeError("[NM] DataReceived: bad!")
 		return
 	}
@@ -553,7 +560,7 @@ func (m *Manager) dataReceived(data []byte, addr netip.AddrPort) {
 			}
 			if len(pk.data) == 1 {
 				// first reply: send our connection id
-				reply := getWithProperty(propPeerNotFound, 9)
+				reply := m.pool.getWithProperty(propPeerNotFound, 9)
 				reply.data[1] = 0
 				binary.LittleEndian.PutUint64(reply.data[2:], uint64(peer.currentConnectTime()))
 				m.sendAndRecycle(reply, addr)
@@ -586,16 +593,16 @@ func (m *Manager) dataReceived(data []byte, addr netip.AddrPort) {
 
 	case propDisconnect:
 		if peer == nil {
-			recyclePacket(pk)
+			m.pool.recycle(pk)
 		} else if !peer.remoteDisconnect(pk) {
-			recyclePacket(pk)
+			m.pool.recycle(pk)
 			return // not ours: no ShutdownOk
 		}
-		m.sendAndRecycle(getWithProperty(propShutdownOk, 0), addr)
+		m.sendAndRecycle(m.pool.getWithProperty(propShutdownOk, 0), addr)
 
 	case propConnectRequest:
 		if int32(binary.LittleEndian.Uint32(pk.data[1:])) != protocolID {
-			m.sendAndRecycle(getWithProperty(propInvalidProtocol, 0), addr)
+			m.sendAndRecycle(m.pool.getWithProperty(propInvalidProtocol, 0), addr)
 			return
 		}
 		m.processConnectRequest(addr, peer, pk)
@@ -604,7 +611,7 @@ func (m *Manager) dataReceived(data []byte, addr netip.AddrPort) {
 		if peer != nil {
 			peer.processPacket(pk)
 		} else {
-			m.sendAndRecycle(getWithProperty(propPeerNotFound, 0), addr)
+			m.sendAndRecycle(m.pool.getWithProperty(propPeerNotFound, 0), addr)
 		}
 	}
 }

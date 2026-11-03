@@ -45,18 +45,20 @@ Set `UnsyncedEvents` before `Start` to receive events on a library goroutine ins
 - Errors are returned instead of thrown (`Start`, `Send` with `ErrTooBigPacket`, `PacketProcessor`).
 - Addresses are `netip.AddrPort`. Overloads taking `start`/`length` are replaced by slices.
 - `PacketProcessor` identifies a packet type by the full name of its C# counterpart, passed explicitly (`"MyGame.JoinPacket"`). Exported struct fields map to the C# public properties in declaration order.
-- Statistics are always collected, and the packet loss and latency simulation (`SimulatePacketLoss`, `SimulateLatency`) is always available; the reference enables both only in DEBUG builds.
 - Library errors go to the standard `log` package unless `SetLogger` installs a `NetLogger` (the reference writes them to the console).
-- Packet pooling uses `sync.Pool`, so `PacketPoolSize` has no counterpart.
+
+## Release and debug builds
+
+Like the reference, the default build matches a Release build of LiteNetLib: most statistics are not collected and `SimulatePacketLoss`/`SimulateLatency` have no effect. Build with `-tags debug` to get the reference DEBUG behavior (`STATS_ENABLED` statistics and the network simulation).
 
 ## Development
 
 ```sh
-mise run test   # go test -race ./...
+mise run test   # go test -race, release and debug builds
 mise run bench  # hot path benchmarks
 ```
 
-The interop tests build a .NET client from the unmodified v0.8.3 sources and run it against the Go server. They expect the reference checkout at `~/Code/LiteNetLib` (override with `LITENETLIB_SRC=/path/to/LiteNetLib/LiteNetLib`) and are skipped when `dotnet` is not installed.
+The interop tests build a .NET client from the unmodified v0.8.3 sources and run it against the Go server. They expect the reference checkout at `~/Code/LiteNetLib` (override with `LITENETLIB_SRC=/path/to/LiteNetLib/LiteNetLib`) and are skipped when `dotnet` is not installed. CI (`.github/workflows/ci.yml`) runs everything on Linux, macOS and Windows.
 
 ## License
 

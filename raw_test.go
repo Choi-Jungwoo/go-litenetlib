@@ -321,33 +321,6 @@ func TestRawRestart(t *testing.T) {
 	}
 }
 
-func TestRawSimulatePacketLoss(t *testing.T) {
-	m := startServer(t, &litenetlib.EventBasedListener{}, func(m *litenetlib.Manager) {
-		m.SimulatePacketLoss = true
-		m.SimulationPacketLossChance = 100
-	})
-	c := newRawClient(t, m.LocalPort())
-	c.send(pUnreliable)
-	c.expectNothing() // the datagram was dropped before processing
-}
-
-func TestRawSimulateLatency(t *testing.T) {
-	m := startServer(t, &litenetlib.EventBasedListener{}, func(m *litenetlib.Manager) {
-		m.SimulateLatency = true
-		m.SimulationMinLatency = 200
-		m.SimulationMaxLatency = 200
-	})
-	c := newRawClient(t, m.LocalPort())
-	start := time.Now()
-	c.send(pUnreliable)
-	if d := c.recv(time.Second); !bytes.Equal(d, []byte{pPeerNotFound}) {
-		t.Fatalf("got % x, want delayed PeerNotFound", d)
-	}
-	if held := time.Since(start); held < 200*time.Millisecond || held > 400*time.Millisecond {
-		t.Fatalf("incoming datagram held %v, want about 200ms", held)
-	}
-}
-
 func TestRawSmallAPI(t *testing.T) {
 	requestTypes := make(chan litenetlib.ConnectionRequestType, 1)
 	connected := make(chan *litenetlib.Peer, 1)
@@ -376,25 +349,7 @@ func TestRawSmallAPI(t *testing.T) {
 		t.Errorf("FirstPeer %v, want the connected peer", m.FirstPeer())
 	}
 
-	c.send(pPing, 5, 0)
-	c.expect(pPong)
-	deadline := time.Now().Add(time.Second)
-	for m.Statistics().PacketsReceived < 2 || p.Statistics().PacketsSent == 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("statistics never counted traffic: %+v %+v", m.Statistics(), p.Statistics())
-		}
-		p.Send([]byte{1}, litenetlib.Unreliable)
-		p.Flush()
-		time.Sleep(5 * time.Millisecond)
-	}
-	p.ResetStatistics()
-	m.ResetStatistics()
-	if s := p.Statistics(); s != (litenetlib.Statistics{}) {
-		t.Errorf("peer statistics after reset: %+v", s)
-	}
-	if s := m.Statistics(); s.PacketsReceived != 0 || s.BytesSent != 0 {
-		t.Errorf("manager statistics after reset: %+v", s)
-	}
+	checkStatistics(t, m, p, c)
 
 	s := litenetlib.Statistics{PacketsSent: 4, PacketsReceived: 3, BytesSent: 20, BytesReceived: 10, PacketLoss: 1}
 	want := "BytesReceived: 10\nPacketsReceived: 3\nBytesSent: 20\nPacketsSent: 4\nPacketLoss: 1\nPacketLossPercent: 25\n"

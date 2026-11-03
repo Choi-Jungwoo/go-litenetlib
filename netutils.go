@@ -71,29 +71,21 @@ func GetLocalIPList(addrType LocalAddrType) []string {
 	wanted := func(a netip.Addr) bool { return (wantV4 && a.Is4()) || (wantV6 && a.Is6()) }
 	var list []string
 
-	routed := defaultRouteSources()
+	hasGateway := gatewayInterfaces()
 	ifaces, _ := net.Interfaces()
 	for _, ifi := range ifaces {
-		if ifi.Flags&net.FlagLoopback != 0 || ifi.Flags&net.FlagUp == 0 {
+		if ifi.Flags&net.FlagLoopback != 0 || ifi.Flags&net.FlagUp == 0 || !hasGateway(ifi) {
 			continue
 		}
-		var addrs []netip.Addr
-		hasGateway := false
 		ifAddrs, _ := ifi.Addrs()
 		for _, a := range ifAddrs {
-			if ipn, ok := a.(*net.IPNet); ok {
-				addr, _ := netip.AddrFromSlice(ipn.IP)
-				addr = addr.Unmap()
-				addrs = append(addrs, addr)
-				hasGateway = hasGateway || routed[addr]
+			ipn, ok := a.(*net.IPNet)
+			if !ok {
+				continue
 			}
-		}
-		if !hasGateway {
-			continue
-		}
-		for _, a := range addrs {
-			if wanted(a) {
-				list = append(list, a.String())
+			addr, _ := netip.AddrFromSlice(ipn.IP)
+			if addr = addr.Unmap(); wanted(addr) {
+				list = append(list, addr.String())
 			}
 		}
 	}
@@ -117,24 +109,6 @@ func GetLocalIPList(addrType LocalAddrType) []string {
 		}
 	}
 	return list
-}
-
-// defaultRouteSources returns the local addresses the default routes leave from. An
-// interface owning one of them is an interface with a gateway. Connecting a UDP socket
-// only consults the routing table; nothing is sent.
-func defaultRouteSources() map[netip.Addr]bool {
-	sources := map[netip.Addr]bool{}
-	for _, target := range []string{"8.8.8.8:53", "[2001:4860:4860::8888]:53"} {
-		c, err := net.Dial("udp", target)
-		if err != nil {
-			continue
-		}
-		if ap, err := netip.ParseAddrPort(c.LocalAddr().String()); err == nil {
-			sources[ap.Addr().WithZone("")] = true
-		}
-		c.Close()
-	}
-	return sources
 }
 
 // GetLocalIP returns the first local address of the requested families, or "".

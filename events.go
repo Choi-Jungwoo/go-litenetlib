@@ -44,7 +44,7 @@ type PacketReader struct {
 func (r *PacketReader) Recycle() {
 	r.Clear()
 	if r.packet != nil {
-		recyclePacket(r.packet)
+		r.m.pool.recycle(r.packet)
 	}
 	r.packet = nil
 	r.m.recycleEvent(r.evt)

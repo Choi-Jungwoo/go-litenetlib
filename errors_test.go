@@ -12,12 +12,20 @@ import (
 // TestHostUnreachableDisconnectsPeer follows NetManager.SendRaw: a HostUnreachable send
 // error force-disconnects the peer, then raises a network error event.
 func TestHostUnreachableDisconnectsPeer(t *testing.T) {
-	unreachable := netip.MustParseAddrPort("0.0.0.1:9")
+	// macOS refuses 0.0.0.1; on Linux, `ip route add unreachable 203.0.113.0/24` makes
+	// TEST-NET-3 fail with EHOSTUNREACH.
+	var unreachable netip.AddrPort
 	probe, _ := net.ListenUDP("udp4", nil)
-	_, err := probe.WriteToUDPAddrPort([]byte{0}, unreachable)
+	for _, candidate := range []string{"0.0.0.1:9", "203.0.113.1:9"} {
+		addr := netip.MustParseAddrPort(candidate)
+		if _, err := probe.WriteToUDPAddrPort([]byte{0}, addr); errors.Is(err, syscall.EHOSTUNREACH) {
+			unreachable = addr
+			break
+		}
+	}
 	probe.Close()
-	if !errors.Is(err, syscall.EHOSTUNREACH) {
-		t.Skipf("platform does not report EHOSTUNREACH for %v: %v", unreachable, err)
+	if !unreachable.IsValid() {
+		t.Skip("no destination fails with EHOSTUNREACH here")
 	}
 
 	var events []string

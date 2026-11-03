@@ -56,14 +56,16 @@ func (c *reliableChannel) processAck(p *packet) {
 		}
 		idx := seq % DefaultWindowSize
 		if acks[SequencedHeaderSize+idx/bitsInByte]&(1<<(idx%bitsInByte)) == 0 {
-			c.peer.stats.PacketLoss++ // false ack
+			if debugBuild {
+				c.peer.stats.PacketLoss++ // false ack
+			}
 			continue
 		}
 		if seq == c.localWindowStart {
 			c.localWindowStart = (c.localWindowStart + 1) % MaxSequence
 		}
 		if pp := &c.pending[idx]; pp.packet != nil {
-			recyclePacket(pp.packet)
+			c.peer.m.pool.recycle(pp.packet)
 			pp.packet = nil
 		}
 	}
@@ -203,7 +205,7 @@ func (c *sequencedChannel) sendNextPackets() {
 			if c.reliable && i == len(c.queue)-1 {
 				c.lastPacket = p
 			} else {
-				recyclePacket(p)
+				c.peer.m.pool.recycle(p)
 			}
 		}
 		c.queue = dequeue(c.queue, len(c.queue))

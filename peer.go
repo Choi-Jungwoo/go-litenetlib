@@ -315,7 +315,7 @@ func (p *Peer) Send(data []byte, method DeliveryMethod) error {
 	hs := propertyHeaderSize(prop)
 	mtu := p.Mtu()
 	if len(data)+hs <= mtu {
-		pk := getWithData(prop, data)
+		pk := p.m.pool.getWithData(prop, data)
 		p.queueMu.Lock()
 		*queue = append(*queue, pk)
 		p.queueMu.Unlock()
@@ -342,7 +342,7 @@ func (p *Peer) Send(data []byte, method DeliveryMethod) error {
 	defer p.queueMu.Unlock()
 	for i := 0; i < total; i++ {
 		chunk := data[i*packetDataSize : min(len(data), (i+1)*packetDataSize)]
-		pk := getWithProperty(prop, len(chunk)+FragmentHeaderSize)
+		pk := p.m.pool.getWithProperty(prop, len(chunk)+FragmentHeaderSize)
 		pk.setFragment(p.fragmentID, uint16(i), uint16(total))
 		pk.markFragmented()
 		copy(pk.data[dataOffset:], chunk)
@@ -417,7 +417,7 @@ func (p *Peer) addIncomingPacket(pk *packet) {
 	}
 	part := int(pk.fragmentPart())
 	if part >= len(inc.fragments) || inc.fragments[part] != nil {
-		recyclePacket(pk)
+		p.m.pool.recycle(pk)
 		writeError("Invalid fragment packet")
 		return
 	}
@@ -429,13 +429,13 @@ func (p *Peer) addIncomingPacket(pk *packet) {
 		return
 	}
 
-	result := getWithProperty(pk.property(), inc.totalSize)
+	result := p.m.pool.getWithProperty(pk.property(), inc.totalSize)
 	offset := result.headerSize()
 	firstSize := len(inc.fragments[0].data) - dataOffset
 	for i, f := range inc.fragments {
 		// Inconsistent fragment sizes panic here like Buffer.BlockCopy throws in the reference.
 		copy(result.data[offset+firstSize*i:offset+firstSize*i+len(f.data)-dataOffset], f.data[dataOffset:])
-		recyclePacket(f)
+		p.m.pool.recycle(f)
 		inc.fragments[i] = nil
 	}
 	p.m.receiveFromPeer(p, result)
@@ -457,7 +457,7 @@ func (p *Peer) processMtuPacket(pk *packet) {
 		p.mtuCheckAttempts = 0
 		pk.setProperty(propMtuOk)
 		p.sendRaw(pk.data)
-		recyclePacket(pk)
+		p.m.pool.recycle(pk)
 	} else if receivedMtu > p.Mtu() && !p.finishMtu {
 		if receivedMtu != possibleMtu[p.mtuIdx+1] {
 			return
@@ -489,13 +489,13 @@ func (p *Peer) updateMtuLogic(delta int) {
 	}
 	// The probe keeps connection number 0, exactly like the reference.
 	newMtu := possibleMtu[p.mtuIdx+1]
-	pk := getWithProperty(propMtuCheck, newMtu-HeaderSize)
+	pk := p.m.pool.getWithProperty(propMtuCheck, newMtu-HeaderSize)
 	binary.LittleEndian.PutUint32(pk.data[1:], uint32(newMtu))
 	binary.LittleEndian.PutUint32(pk.data[len(pk.data)-4:], uint32(newMtu))
 	if p.sendRaw(pk.data) <= 0 {
 		p.finishMtu = true
 	}
-	recyclePacket(pk)
+	p.m.pool.recycle(pk)
 }
 
 // processConnectRequest mirrors NetPeer.ProcessConnectRequest; it also returns the current connection number.
@@ -530,11 +530,11 @@ func (p *Peer) processPacket(pk *packet) {
 
 func (p *Peer) processPacketLocked(pk *packet) {
 	if p.ConnectionState() == StateIncoming {
-		recyclePacket(pk) // not initialized
+		p.m.pool.recycle(pk) // not initialized
 		return
 	}
 	if pk.connectionNumber() != p.connectNum && pk.property() != propShutdownOk {
-		recyclePacket(pk) // old packet
+		p.m.pool.recycle(pk) // old packet
 		return
 	}
 	p.timeSinceLastPacket = 0
@@ -551,15 +551,15 @@ func (p *Peer) processPacketLocked(pk *packet) {
 			if pos+size > len(pk.data) {
 				break
 			}
-			merged := getPacket(size, false)
+			merged := p.m.pool.get(size, false)
 			if !merged.fromBytes(pk.data[pos : pos+size]) {
-				recyclePacket(merged)
+				p.m.pool.recycle(merged)
 				break
 			}
 			pos += size
 			p.processPacketLocked(merged)
 		}
-		recyclePacket(pk)
+		p.m.pool.recycle(pk)
 
 	case propPing:
 		if relativeSequenceNumber(int(pk.sequence()), int(p.pongPacket.sequence())) > 0 {
@@ -567,7 +567,7 @@ func (p *Peer) processPacketLocked(pk *packet) {
 			p.pongPacket.setSequence(pk.sequence())
 			p.sendRaw(p.pongPacket.data)
 		}
-		recyclePacket(pk)
+		p.m.pool.recycle(pk)
 
 	case propPong:
 		if pk.sequence() == p.pingPacket.sequence() {
@@ -577,17 +577,17 @@ func (p *Peer) processPacketLocked(pk *packet) {
 			p.updateRoundTripTime(elapsed)
 			p.m.connectionLatencyUpdated(p, elapsed/2)
 		}
-		recyclePacket(pk)
+		p.m.pool.recycle(pk)
 
 	case propAckReliable:
 		p.reliableUnordered.processAck(pk)
-		recyclePacket(pk)
+		p.m.pool.recycle(pk)
 	case propAckReliableOrdered:
 		p.reliableOrdered.processAck(pk)
-		recyclePacket(pk)
+		p.m.pool.recycle(pk)
 	case propAckReliableSequenced:
 		p.reliableSequenced.processAck(pk)
-		recyclePacket(pk)
+		p.m.pool.recycle(pk)
 	case propSequenced:
 		p.sequenced.processPacket(pk)
 	case propReliableUnordered:
@@ -604,7 +604,7 @@ func (p *Peer) processPacketLocked(pk *packet) {
 		if p.ConnectionState() == StateShutdownRequested {
 			p.setState(StateDisconnected)
 		}
-		recyclePacket(pk)
+		p.m.pool.recycle(pk)
 	default:
 		writeError("Error! Unexpected packet type: %d", pk.property())
 	}
@@ -627,9 +627,9 @@ func (p *Peer) sendMerged() {
 }
 
 func (p *Peer) countSent(n int) {
-	p.stats.PacketsSent++
-	if n > 0 {
-		p.stats.BytesSent += uint64(n)
+	if debugBuild {
+		p.stats.PacketsSent++
+		p.stats.BytesSent += uint64(n) // a failed send (-1) wraps, like (ulong)bytesSent
 	}
 }
 
@@ -669,7 +669,7 @@ func (p *Peer) flushLocked() {
 	p.queueMu.Lock()
 	for _, pk := range p.unreliableQueue {
 		p.sendUserData(pk)
-		recyclePacket(pk)
+		p.m.pool.recycle(pk)
 	}
 	p.unreliableQueue = dequeue(p.unreliableQueue, len(p.unreliableQueue))
 	p.queueMu.Unlock()

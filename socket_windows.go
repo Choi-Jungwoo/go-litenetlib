@@ -19,7 +19,11 @@ func configureSocket(network string, fd uintptr, reuseAddress bool) {
 		if err := syscall.SetsockoptInt(s, syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1); err != nil {
 			writeError("[B]Broadcast error: %v", err)
 		}
+		return
 	}
+	// Receive IPv6 discovery requests sent to the all-nodes multicast group FF02::1.
+	mreq := &syscall.IPv6Mreq{Multiaddr: [16]byte{0: 0xFF, 1: 0x02, 15: 0x01}}
+	_ = syscall.SetsockoptIPv6Mreq(s, syscall.IPPROTO_IPV6, syscall.IPV6_JOIN_GROUP, mreq)
 }
 
 func setTTL(fd uintptr, ttl int) {

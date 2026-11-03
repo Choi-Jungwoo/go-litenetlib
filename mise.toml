@@ -10,7 +10,7 @@ run = "gofmt -l -w ."
 run = "go vet ./..."
 
 [tasks.test]
-run = "go test -race ./..."
+run = ["go test -race ./...", "go test -race -tags debug ./..."]
 
 [tasks.bench]
 run = "go test -run '^$' -bench . -benchmem ./..."

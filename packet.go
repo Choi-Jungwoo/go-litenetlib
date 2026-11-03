@@ -94,14 +94,33 @@ func newPacket(prop packetProperty, size int) *packet {
 	return p
 }
 
-var packetPool = sync.Pool{New: func() any { return &packet{data: make([]byte, 0, maxPacketSize)} }}
+// PacketPoolSize is the maximum number of recycled packets a manager keeps (NetConstants.PacketPoolSize).
+const PacketPoolSize = 1000
 
-// getPacket mirrors NetPacketPool.GetPacket; oversized packets are not pooled.
-func getPacket(size int, clearData bool) *packet {
-	if size > maxPacketSize {
-		return &packet{data: make([]byte, size)}
+// packetPool mirrors NetPacketPool: a bounded stack of reusable packets, one per manager.
+// ponytail: one mutex per manager, faster than sync.Pool on the single-goroutine receive and
+// update paths but ~3x slower under heavy parallel Send; shard it if profiles show contention.
+type packetPool struct {
+	mu    sync.Mutex
+	count int
+	items [PacketPoolSize]*packet
+}
+
+// get mirrors NetPacketPool.GetPacket; packets above maxPacketSize are never taken from the pool.
+func (pp *packetPool) get(size int, clearData bool) *packet {
+	var p *packet
+	if size <= maxPacketSize {
+		pp.mu.Lock()
+		if pp.count > 0 {
+			pp.count--
+			p = pp.items[pp.count]
+			pp.items[pp.count] = nil
+		}
+		pp.mu.Unlock()
 	}
-	p := packetPool.Get().(*packet)
+	if p == nil {
+		return &packet{data: make([]byte, size, max(size, maxPacketSize))}
+	}
 	p.data = p.data[:size]
 	if clearData {
 		clear(p.data)
@@ -109,25 +128,31 @@ func getPacket(size int, clearData bool) *packet {
 	return p
 }
 
-func getWithProperty(prop packetProperty, size int) *packet {
-	p := getPacket(size+propertyHeaderSize(prop), true)
+func (pp *packetPool) getWithProperty(prop packetProperty, size int) *packet {
+	p := pp.get(size+propertyHeaderSize(prop), true)
 	p.setProperty(prop)
 	return p
 }
 
-func getWithData(prop packetProperty, data []byte) *packet {
-	p := getWithProperty(prop, len(data))
+func (pp *packetPool) getWithData(prop packetProperty, data []byte) *packet {
+	p := pp.getWithProperty(prop, len(data))
 	copy(p.data[propertyHeaderSize(prop):], data)
 	return p
 }
 
-func recyclePacket(p *packet) {
-	if cap(p.data) != maxPacketSize {
-		return // don't pool big packets
+// recycle mirrors NetPacketPool.Recycle: big packets are not pooled and a full pool drops the packet.
+func (pp *packetPool) recycle(p *packet) {
+	if cap(p.data) > maxPacketSize {
+		return
 	}
 	p.data = p.data[:1]
 	p.data[0] = 0 // clean fragmented flag
-	packetPool.Put(p)
+	pp.mu.Lock()
+	if pp.count < PacketPoolSize {
+		pp.items[pp.count] = p
+		pp.count++
+	}
+	pp.mu.Unlock()
 }
 
 // fromBytes mirrors NetPacket.FromBytes validation.

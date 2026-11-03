@@ -3,6 +3,7 @@ package litenetlib
 import (
 	"encoding/binary"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 )
 
@@ -88,7 +89,7 @@ func BenchmarkSendFragmented(b *testing.B) {
 		}
 		p.queueMu.Lock()
 		for _, pk := range p.reliableUnordered.queue {
-			recyclePacket(pk)
+			p.m.pool.recycle(pk)
 		}
 		p.reliableUnordered.queue = p.reliableUnordered.queue[:0]
 		p.queueMu.Unlock()
@@ -133,4 +134,21 @@ func BenchmarkLoopbackSendUnreliable(b *testing.B) {
 		_ = p.Send(data, Unreliable)
 		p.Flush()
 	}
+}
+
+// BenchmarkParallelSendFlush sends from many goroutines to distinct peers sharing one manager pool.
+func BenchmarkParallelSendFlush(b *testing.B) {
+	m := NewManager(&EventBasedListener{})
+	var next atomic.Int32
+	data := make([]byte, 64)
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		port := uint16(10000 + next.Add(1))
+		p := m.tryAddPeer(newPeer(m, netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port), int(port)))
+		p.accept(1, 0)
+		for pb.Next() {
+			_ = p.Send(data, Unreliable)
+			p.Flush()
+		}
+	})
 }
