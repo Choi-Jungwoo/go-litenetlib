@@ -192,14 +192,9 @@ func (m *Manager) Stop(sendDisconnectMessages bool) {
 	m.eventsMu.Unlock()
 }
 
-// snapshotPeers appends the peers, newest first, to dst.
+// snapshotPeers appends all peers, newest first, to dst.
 func (m *Manager) snapshotPeers(dst []*Peer) []*Peer {
-	m.peersMu.RLock()
-	defer m.peersMu.RUnlock()
-	for p := m.headPeer; p != nil; p = p.next {
-		dst = append(dst, p)
-	}
-	return dst
+	return m.Peers(dst, StateAny|StateDisconnected)
 }
 
 // Peers appends the peers whose state matches the state flags to dst, newest first.
@@ -218,17 +213,7 @@ func (m *Manager) Peers(dst []*Peer, state ConnectionState) []*Peer {
 func (m *Manager) PeersCount() int { return int(m.connectedPeers.Load()) }
 
 // PeersCountInState counts the peers whose state matches the state flags.
-func (m *Manager) PeersCountInState(state ConnectionState) int {
-	m.peersMu.RLock()
-	defer m.peersMu.RUnlock()
-	n := 0
-	for p := m.headPeer; p != nil; p = p.next {
-		if p.ConnectionState()&state != 0 {
-			n++
-		}
-	}
-	return n
-}
+func (m *Manager) PeersCountInState(state ConnectionState) int { return len(m.Peers(nil, state)) }
 
 // Statistics returns a snapshot of the counters of all connections.
 func (m *Manager) Statistics() Statistics {
@@ -577,13 +562,13 @@ func (m *Manager) dataReceived(data []byte, addr netip.AddrPort) {
 
 	case propDiscoveryRequest:
 		if m.DiscoveryEnabled {
-			m.pushUnconnected(evDiscoveryRequest, addr, pk)
+			m.pushUnconnected(DiscoveryRequest, addr, pk)
 		}
 	case propDiscoveryResponse:
-		m.pushUnconnected(evDiscoveryResponse, addr, pk)
+		m.pushUnconnected(DiscoveryResponse, addr, pk)
 	case propUnconnectedMessage:
 		if m.UnconnectedMessagesEnabled {
-			m.pushUnconnected(evReceiveUnconnected, addr, pk)
+			m.pushUnconnected(BasicMessage, addr, pk)
 		}
 	case propNatIntroduction, propNatIntroductionRequest, propNatPunchMessage:
 		if m.NatPunchEnabled {
@@ -686,8 +671,9 @@ func (m *Manager) connectionLatencyUpdated(p *Peer, latency int) {
 	m.pushEvent(evt)
 }
 
-func (m *Manager) pushUnconnected(typ eventType, addr netip.AddrPort, pk *packet) {
-	evt := m.newEvent(typ, nil, addr, nil)
+func (m *Manager) pushUnconnected(typ UnconnectedMessageType, addr netip.AddrPort, pk *packet) {
+	evt := m.newEvent(evReceiveUnconnected, nil, addr, nil)
+	evt.msgType = typ
 	evt.setSource(pk)
 	m.pushEvent(evt)
 }

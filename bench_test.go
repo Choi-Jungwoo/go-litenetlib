@@ -201,3 +201,27 @@ func BenchmarkParallelSendFlush(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkPacketProcessorReadPacket decodes one reflected struct packet.
+func BenchmarkPacketProcessorReadPacket(b *testing.B) {
+	type packet struct {
+		A, B int32
+		S    string
+	}
+	pp := NewPacketProcessor(0)
+	if err := SubscribeReusable(pp, "P", func(*packet, any) {}); err != nil {
+		b.Fatal(err)
+	}
+	w := &DataWriter{}
+	if err := Write(pp, w, "P", &packet{1, 2, "hi"}); err != nil {
+		b.Fatal(err)
+	}
+	r := &DataReader{}
+	b.ReportAllocs()
+	for range b.N {
+		r.SetSource(w.Data())
+		if err := pp.ReadPacket(r, nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

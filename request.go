@@ -14,15 +14,6 @@ const (
 	RequestReject
 )
 
-// ConnectionRequestType tells how a connection was requested.
-type ConnectionRequestType byte
-
-const (
-	RequestIncoming ConnectionRequestType = iota
-	// RequestPeerToPeer is only produced by client-side NetManagers.
-	RequestPeerToPeer
-)
-
 // ConnectionRequest is an incoming connection waiting for Accept or Reject (ConnectionRequest.cs).
 type ConnectionRequest struct {
 	// Data is the connection data sent by the client.
@@ -38,9 +29,6 @@ type ConnectionRequest struct {
 // RemoteEndPoint is the address of the connecting client.
 func (r *ConnectionRequest) RemoteEndPoint() netip.AddrPort { return r.peer.addr }
 
-// Type is always RequestIncoming on a server.
-func (r *ConnectionRequest) Type() ConnectionRequestType { return RequestIncoming }
-
 // Result reports whether the request was accepted or rejected.
 func (r *ConnectionRequest) Result() ConnectionRequestResult {
 	return ConnectionRequestResult(r.result.Load())
@@ -53,22 +41,12 @@ func (r *ConnectionRequest) AcceptIfKey(key string) *Peer {
 	if !r.tryActivate() {
 		return nil
 	}
-	if r.dataMatches(key) {
+	if s, ok := r.Data.TryGetString(); ok && s == key {
 		r.solve(RequestAccept, nil)
 		return r.peer
 	}
 	r.solve(RequestReject, nil)
 	return nil
-}
-
-func (r *ConnectionRequest) dataMatches(key string) (ok bool) {
-	defer func() {
-		if recover() != nil {
-			writeError("[AC] Invalid incoming data")
-			ok = false
-		}
-	}()
-	return r.Data.GetString() == key
 }
 
 // Accept accepts the connection and returns the connected peer, or nil if already solved.

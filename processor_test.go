@@ -181,3 +181,45 @@ func TestPacketProcessorNestedTypePrecedence(t *testing.T) {
 		t.Fatalf("got % x, want % x", w.Data(), want.Data())
 	}
 }
+
+// A packet whose fields end early is dropped, not delivered half-filled.
+func TestPacketProcessorDropsTruncatedPacket(t *testing.T) {
+	type pair struct{ A, B int32 }
+	pp := litenetlib.NewPacketProcessor(0)
+	called := false
+	if err := litenetlib.Subscribe(pp, "Pair", func(*pair, any) { called = true }); err != nil {
+		t.Fatal(err)
+	}
+	w := litenetlib.NewDataWriter()
+	w.PutULong(litenetlib.PacketHash("Pair"))
+	w.PutInt(1) // B is missing
+	if err := pp.ReadPacket(litenetlib.NewDataReader(w.Data()), nil); err == nil {
+		t.Error("truncated packet read without error")
+	}
+	if called {
+		t.Error("truncated packet delivered")
+	}
+}
+
+// Trailing bytes too short for a type hash end ReadAllPackets with an error instead of a panic.
+func TestPacketProcessorRejectsShortHash(t *testing.T) {
+	pp := litenetlib.NewPacketProcessor(0)
+	if err := pp.ReadAllPackets(litenetlib.NewDataReader([]byte{1, 2, 3}), nil); err == nil {
+		t.Fatal("3-byte packet read without error")
+	}
+}
+
+// A Serializable whose Deserialize reads past the end is dropped like a truncated struct.
+func TestPacketProcessorDropsTruncatedSerializable(t *testing.T) {
+	pp := litenetlib.NewPacketProcessor(0)
+	called := false
+	litenetlib.SubscribeNetSerializable(pp, "Interop.Ping", func(*ping, any) { called = true })
+	w := litenetlib.NewDataWriter()
+	w.PutULong(litenetlib.PacketHash("Interop.Ping")) // Seq is missing
+	if err := pp.ReadPacket(litenetlib.NewDataReader(w.Data()), nil); err == nil {
+		t.Error("truncated packet read without error")
+	}
+	if called {
+		t.Error("truncated packet delivered")
+	}
+}

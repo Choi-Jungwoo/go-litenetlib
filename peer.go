@@ -409,14 +409,19 @@ func (p *Peer) addIncomingPacket(pk *packet) {
 		p.m.receiveFromPeer(p, pk)
 		return
 	}
-	id := pk.fragmentID()
+	// The reference client fragments only reliable packets (NetPeer.Send); fragments on other
+	// channels would let a sender pile up unbounded reassembly state, so they are dropped.
+	if prop := pk.property(); prop != propReliableOrdered && prop != propReliableUnordered {
+		p.m.pool.recycle(pk)
+		return
+	}
+	id, part, total := pk.fragmentID(), int(pk.fragmentPart()), int(pk.fragmentsTotal())
 	inc := p.holdedFragments[id]
-	if inc == nil {
-		inc = &incomingFragments{fragments: make([]*packet, pk.fragmentsTotal())}
+	if inc == nil && part < total { // a zero total would hold its id forever, as in the reference
+		inc = &incomingFragments{fragments: make([]*packet, total)}
 		p.holdedFragments[id] = inc
 	}
-	part := int(pk.fragmentPart())
-	if part >= len(inc.fragments) || inc.fragments[part] != nil {
+	if inc == nil || part >= len(inc.fragments) || inc.fragments[part] != nil {
 		p.m.pool.recycle(pk)
 		writeError("Invalid fragment packet")
 		return

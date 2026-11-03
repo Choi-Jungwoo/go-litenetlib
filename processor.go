@@ -13,8 +13,12 @@ type Serializable interface {
 	Deserialize(r *DataReader)
 }
 
-// ErrUndefinedPacket is returned by ReadPacket for a hash with no subscription.
-var ErrUndefinedPacket = errors.New("litenetlib: undefined packet in DataReader")
+var (
+	// ErrUndefinedPacket is returned by ReadPacket for a hash with no subscription.
+	ErrUndefinedPacket = errors.New("litenetlib: undefined packet in DataReader")
+	// ErrMalformedPacket is returned by ReadPacket for a packet that ends early; it is not delivered.
+	ErrMalformedPacket = errors.New("litenetlib: malformed packet in DataReader")
+)
 
 // PacketProcessor routes packets prefixed with a type hash to callbacks, serializing
 // struct fields like NetPacketProcessor/NetSerializer. A packet type is identified by the
@@ -22,7 +26,7 @@ var ErrUndefinedPacket = errors.New("litenetlib: undefined packet in DataReader"
 // its public properties in declaration order. It is not safe for concurrent use.
 type PacketProcessor struct {
 	maxStringLength int
-	callbacks       map[uint64]func(r *DataReader, userData any)
+	callbacks       map[uint64]func(r *DataReader, userData any) error
 	nested          map[reflect.Type]codec
 	structs         map[reflect.Type][]fieldCodec
 	writer          DataWriter // reused by the Send helpers
@@ -42,7 +46,7 @@ type fieldCodec struct {
 func NewPacketProcessor(maxStringLength int) *PacketProcessor {
 	return &PacketProcessor{
 		maxStringLength: maxStringLength,
-		callbacks:       make(map[uint64]func(*DataReader, any)),
+		callbacks:       make(map[uint64]func(*DataReader, any) error),
 		nested:          make(map[reflect.Type]codec),
 		structs:         make(map[reflect.Type][]fieldCodec),
 	}
@@ -75,28 +79,27 @@ func RegisterNestedType[T any](pp *PacketProcessor, write func(w *DataWriter, v 
 
 // Subscribe calls onReceive with a new *T for every packet named typeName.
 func Subscribe[T any](pp *PacketProcessor, typeName string, onReceive func(packet *T, userData any)) error {
-	fields, err := pp.register(reflect.TypeFor[T]())
-	if err != nil {
-		return err
-	}
-	pp.callbacks[PacketHash(typeName)] = func(r *DataReader, userData any) {
-		p := new(T)
-		readFields(r, reflect.ValueOf(p).Elem(), fields)
-		onReceive(p, userData)
-	}
-	return nil
+	return subscribe(pp, typeName, onReceive, func() *T { return new(T) })
 }
 
 // SubscribeReusable is Subscribe reusing one *T for all packets.
 func SubscribeReusable[T any](pp *PacketProcessor, typeName string, onReceive func(packet *T, userData any)) error {
+	p := new(T)
+	return subscribe(pp, typeName, onReceive, func() *T { return p })
+}
+
+func subscribe[T any](pp *PacketProcessor, typeName string, onReceive func(*T, any), packet func() *T) error {
 	fields, err := pp.register(reflect.TypeFor[T]())
 	if err != nil {
 		return err
 	}
-	p := new(T)
-	pp.callbacks[PacketHash(typeName)] = func(r *DataReader, userData any) {
-		readFields(r, reflect.ValueOf(p).Elem(), fields)
+	pp.callbacks[PacketHash(typeName)] = func(r *DataReader, userData any) error {
+		p := packet()
+		if !readFields(r, reflect.ValueOf(p).Elem(), fields) {
+			return ErrMalformedPacket
+		}
 		onReceive(p, userData)
+		return nil
 	}
 	return nil
 }
@@ -106,10 +109,13 @@ func SubscribeNetSerializable[T any, PT interface {
 	*T
 	Serializable
 }](pp *PacketProcessor, typeName string, onReceive func(packet PT, userData any)) {
-	pp.callbacks[PacketHash(typeName)] = func(r *DataReader, userData any) {
+	pp.callbacks[PacketHash(typeName)] = func(r *DataReader, userData any) error {
 		p := PT(new(T))
-		p.Deserialize(r)
+		if !deserialize(p, r) {
+			return ErrMalformedPacket
+		}
 		onReceive(p, userData)
+		return nil
 	}
 }
 
@@ -143,12 +149,14 @@ func (pp *PacketProcessor) WriteNetSerializable(w *DataWriter, typeName string, 
 
 // ReadPacket reads one packet and calls its subscription.
 func (pp *PacketProcessor) ReadPacket(r *DataReader, userData any) error {
+	if r.AvailableBytes() < 8 { // the uint64 type hash
+		return ErrMalformedPacket
+	}
 	cb, ok := pp.callbacks[r.GetULong()]
 	if !ok {
 		return ErrUndefinedPacket
 	}
-	cb(r, userData)
-	return nil
+	return cb(r, userData)
 }
 
 // ReadAllPackets reads packets until the reader is exhausted.
@@ -161,13 +169,20 @@ func (pp *PacketProcessor) ReadAllPackets(r *DataReader, userData any) error {
 	return nil
 }
 
-// readFields deserializes into v. Like NetSerializer.Deserialize, a malformed packet stops
-// reading but the (partially filled) packet is still delivered.
-func readFields(r *DataReader, v reflect.Value, fields []fieldCodec) {
-	defer func() { _ = recover() }()
+// readFields and deserialize report whether the packet was read completely; reading past
+// the end panics. The reference still delivers a partially read packet; this port drops it.
+func readFields(r *DataReader, v reflect.Value, fields []fieldCodec) (ok bool) {
+	defer func() { _ = recover() }() // a panic leaves ok false
 	for _, f := range fields {
 		f.read(r, v.Field(f.index))
 	}
+	return true
+}
+
+func deserialize(p Serializable, r *DataReader) (ok bool) {
+	defer func() { _ = recover() }() // a panic leaves ok false
+	p.Deserialize(r)
+	return true
 }
 
 func (pp *PacketProcessor) register(t reflect.Type) ([]fieldCodec, error) {

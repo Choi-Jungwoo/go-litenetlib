@@ -16,6 +16,7 @@ import (
 // Packet property ids from NetPacket.cs v0.8.3.
 const (
 	pUnreliable        = 0
+	pSequenced         = 2
 	pReliableOrdered   = 3
 	pAckReliableOrder  = 5
 	pPing              = 6
@@ -29,6 +30,7 @@ const (
 	pMerged            = 19
 	pShutdownOk        = 20
 	pPeerNotFound      = 23
+	pReliableSequenced = 21
 	pInvalidProtocol   = 24
 )
 
@@ -395,26 +397,12 @@ func TestRawStopFromCallbackDuringStop(t *testing.T) {
 // TestRawInconsistentFragmentsDropped: parts that do not tile the result are dropped, and a
 // later well-formed fragmented packet is still delivered.
 func TestRawInconsistentFragmentsDropped(t *testing.T) {
-	got := make(chan string, 4)
-	m := startServer(t, &litenetlib.EventBasedListener{
-		ConnectionRequest: acceptKey,
-		NetworkReceive: func(_ *litenetlib.Peer, r *litenetlib.PacketReader, _ litenetlib.DeliveryMethod) {
-			got <- string(r.GetRemainingBytes())
-			r.Recycle()
-		},
-	}, nil)
-	c := newRawClient(t, m.LocalPort())
-	c.send(connectRequest(7, 42, 0, "key")...)
-	c.expect(pConnectAccept)
+	c, got := connectedReceiver(t)
 
 	seq := uint16(0)
 	sendFragments := func(id uint16, parts ...string) {
 		for i, part := range parts {
-			b := []byte{pReliableOrdered | 0x80}
-			for _, v := range []uint16{seq, id, uint16(i), uint16(len(parts))} {
-				b = binary.LittleEndian.AppendUint16(b, v)
-			}
-			c.send(append(b, part...)...)
+			c.send(fragment(pReliableOrdered, seq, id, uint16(i), uint16(len(parts)), part)...)
 			seq++
 		}
 	}
@@ -562,11 +550,9 @@ func TestRawSendDuringRestart(t *testing.T) {
 }
 
 func TestRawSmallAPI(t *testing.T) {
-	requestTypes := make(chan litenetlib.ConnectionRequestType, 1)
 	connected := make(chan *litenetlib.Peer, 1)
 	m := litenetlib.NewManager(&litenetlib.EventBasedListener{
 		ConnectionRequest: func(r *litenetlib.ConnectionRequest) {
-			requestTypes <- r.Type()
 			r.AcceptIfKey("key")
 		},
 		PeerConnected: func(p *litenetlib.Peer) { connected <- p },
@@ -582,9 +568,6 @@ func TestRawSmallAPI(t *testing.T) {
 	c := newRawClient(t, m.LocalPort())
 	c.send(connectRequest(7, 1, 0, "key")...)
 	p := <-connected
-	if typ := <-requestTypes; typ != litenetlib.RequestIncoming {
-		t.Errorf("request type %v, want RequestIncoming", typ)
-	}
 	if m.FirstPeer() != p {
 		t.Errorf("FirstPeer %v, want the connected peer", m.FirstPeer())
 	}
@@ -595,5 +578,79 @@ func TestRawSmallAPI(t *testing.T) {
 	want := "BytesReceived: 10\nPacketsReceived: 3\nBytesSent: 20\nPacketsSent: 4\nPacketLoss: 1\nPacketLossPercent: 25\n"
 	if s.String() != want {
 		t.Errorf("String() = %q, want %q", s.String(), want)
+	}
+}
+
+// connectedReceiver connects a raw client to a new server that sends every received
+// payload to got.
+func connectedReceiver(t *testing.T) (*rawClient, <-chan string) {
+	t.Helper()
+	got := make(chan string, 4)
+	m := startServer(t, &litenetlib.EventBasedListener{
+		ConnectionRequest: acceptKey,
+		NetworkReceive: func(_ *litenetlib.Peer, r *litenetlib.PacketReader, _ litenetlib.DeliveryMethod) {
+			got <- string(r.GetRemainingBytes())
+			r.Recycle()
+		},
+	}, nil)
+	c := newRawClient(t, m.LocalPort())
+	c.send(connectRequest(7, 42, 0, "key")...)
+	c.expect(pConnectAccept)
+	return c, got
+}
+
+// fragment builds a fragmented sequenced-header packet (NetPacket layout).
+func fragment(prop byte, seq, id, part, total uint16, payload string) []byte {
+	b := []byte{prop | 0x80}
+	for _, v := range []uint16{seq, id, part, total} {
+		b = binary.LittleEndian.AppendUint16(b, v)
+	}
+	return append(b, payload...)
+}
+
+// TestRawZeroTotalFragmentDoesNotPoisonID: a fragment claiming zero parts is dropped and its
+// fragment id still carries a later well-formed packet.
+func TestRawZeroTotalFragmentDoesNotPoisonID(t *testing.T) {
+	c, got := connectedReceiver(t)
+
+	c.send(fragment(pReliableOrdered, 0, 5, 0, 0, "x")...)
+	c.send(fragment(pReliableOrdered, 1, 5, 0, 2, "ab")...)
+	c.send(fragment(pReliableOrdered, 2, 5, 1, 2, "c")...)
+	select {
+	case s := <-got:
+		if s != "abc" {
+			t.Fatalf("got %q, want %q", s, "abc")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("well-formed packet on a previously zero-total fragment id not delivered")
+	}
+}
+
+// TestRawUnreliableFragmentsDropped: the reference client only fragments reliable unordered
+// and ordered packets (NetPeer.Send), so fragments on the other channels are never delivered.
+func TestRawUnreliableFragmentsDropped(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		prop byte
+	}{{"Unreliable", pUnreliable}, {"Sequenced", pSequenced}, {"ReliableSequenced", pReliableSequenced}} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, got := connectedReceiver(t)
+
+			c.send(fragment(tc.prop, 1, 9, 0, 2, "ab")...)
+			c.send(fragment(tc.prop, 2, 9, 1, 2, "c")...)
+			plain := []byte{tc.prop}
+			if tc.prop != pUnreliable {
+				plain = binary.LittleEndian.AppendUint16(plain, 3)
+			}
+			c.send(append(plain, "ok"...)...)
+			select {
+			case s := <-got:
+				if s != "ok" {
+					t.Fatalf("got %q, want only the unfragmented %q", s, "ok")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("unfragmented packet not delivered")
+			}
+		})
 	}
 }

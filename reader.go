@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"math"
 	"net/netip"
+	"unicode/utf16"
 )
 
 // DataReader reads values written by a NetDataWriter (Utils/NetDataReader.cs).
@@ -98,7 +99,7 @@ func (r *DataReader) GetStringMax(maxLength int) string {
 	if n <= 0 || n > maxLength*2 {
 		return ""
 	}
-	s := string(r.data[r.position : r.position+n : r.dataSize])
+	s := string(r.peek(n))
 	if utf16Len(s) > maxLength {
 		return ""
 	}
@@ -124,9 +125,8 @@ func (r *DataReader) GetBytesWithLength() []byte {
 
 // GetRemainingBytes returns a copy of the unread bytes and moves to the end.
 func (r *DataReader) GetRemainingBytes() []byte {
-	out := make([]byte, r.AvailableBytes())
-	copy(out, r.data[r.position:])
-	r.position = len(r.data)
+	out := append([]byte{}, r.data[r.position:r.dataSize]...)
+	r.position = r.dataSize
 	return out
 }
 
@@ -238,12 +238,8 @@ func (r *DataReader) TryGetBytesWithLength() ([]byte, bool) {
 // utf16Len counts UTF-16 code units the way .NET decodes s.
 func utf16Len(s string) int {
 	n := 0
-	for _, c := range s {
-		if c > 0xFFFF {
-			n += 2
-		} else {
-			n++
-		}
+	for _, c := range s { // range yields U+FFFD for invalid bytes, so RuneLen is never -1
+		n += utf16.RuneLen(c)
 	}
 	return n
 }

@@ -14,8 +14,6 @@ const (
 	evReceiveUnconnected
 	evError
 	evLatencyUpdated
-	evDiscoveryRequest
-	evDiscoveryResponse
 	evConnectionRequest
 )
 
@@ -28,6 +26,7 @@ type netEvent struct {
 	reason  DisconnectReason
 	request *ConnectionRequest
 	method  DeliveryMethod
+	msgType UnconnectedMessageType
 	reader  PacketReader
 }
 
@@ -154,11 +153,7 @@ func (m *Manager) processEvent(e *netEvent) {
 	case evReceive:
 		l.OnNetworkReceive(e.peer, &e.reader, e.method)
 	case evReceiveUnconnected:
-		l.OnNetworkReceiveUnconnected(e.addr, &e.reader, BasicMessage)
-	case evDiscoveryRequest:
-		l.OnNetworkReceiveUnconnected(e.addr, &e.reader, DiscoveryRequest)
-	case evDiscoveryResponse:
-		l.OnNetworkReceiveUnconnected(e.addr, &e.reader, DiscoveryResponse)
+		l.OnNetworkReceiveUnconnected(e.addr, &e.reader, e.msgType)
 	case evError:
 		l.OnNetworkError(e.addr, e.err)
 	case evLatencyUpdated:

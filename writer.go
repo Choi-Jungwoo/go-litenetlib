@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/netip"
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -81,10 +82,7 @@ func (w *DataWriter) PutStringMax(v string, maxLength int) {
 	start := len(w.data)
 	units := 0
 	for _, c := range v {
-		n := 1
-		if c > 0xFFFF {
-			n = 2
-		}
+		n := utf16.RuneLen(c)
 		if units+n > maxLength {
 			if units < maxLength {
 				w.data = utf8.AppendRune(w.data, utf8.RuneError) // split surrogate pair

@@ -7,7 +7,7 @@ Target version: [LiteNetLib v0.8.3](https://github.com/RevenantX/LiteNetLib/tree
 ## Scope
 
 - **Server**: everything a v0.8.3 `NetManager` does for incoming connections: connection requests (accept, key check, reject with data), the connection state machine, reconnection, the reliable, ordered, sequenced and unreliable channels, fragmentation, packet merging, ping/RTT, MTU discovery, timeouts, graceful disconnects, PeerNotFound handling, unconnected messages, discovery responses and NAT punching (master server and host roles).
-- **Utils**: `DataReader`/`DataWriter` (NetDataReader/NetDataWriter format), `PacketProcessor` (NetPacketProcessor/NetSerializer format), the NetUtils helpers (`ResolveAddress`, `MakeEndPoint`, `GetLocalIP`, `GetLocalIPList`), the SNTP client (`NtpRequest`, `NtpPacket`) and the NetDebug logger (`SetLogger`).
+- **Utils**: `DataReader`/`DataWriter` (NetDataReader/NetDataWriter format), `PacketProcessor` (NetPacketProcessor/NetSerializer format), the NetUtils helpers (`ResolveAddress`, `MakeEndPoint`, `GetLocalIP`, `GetLocalIPList`) and the NetDebug logger (`SetLogger`).
 - **Client**: not planned (`Connect`, discovery broadcast). Use the .NET LiteNetLib client.
 
 ## Installation

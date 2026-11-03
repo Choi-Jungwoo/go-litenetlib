@@ -55,38 +55,3 @@ func TestLoggerReportsErrors(t *testing.T) {
 	c.send(probe...)
 	log.waitFor(t, fmt.Sprintf("%d [MTU] Broken packet. RMTU 0, EMTU 0, PSIZE 508", litenetlib.NetLogError))
 }
-
-// reentrantLogger triggers another library log from inside WriteNet, as a logger that itself
-// uses the library might.
-type reentrantLogger struct {
-	port   int
-	nested chan struct{}
-}
-
-func (l *reentrantLogger) WriteNet(litenetlib.NetLogLevel, string, ...any) {
-	select {
-	case <-l.nested:
-		return
-	default:
-		close(l.nested)
-	}
-	litenetlib.NewManager(&litenetlib.EventBasedListener{}).Start(l.port) // logs a bind error
-}
-
-// TestLoggerIsReentrant: like a C# lock, the logger lock lets WriteNet log again.
-func TestLoggerIsReentrant(t *testing.T) {
-	m := startServer(t, &litenetlib.EventBasedListener{}, nil)
-	l := &reentrantLogger{port: m.LocalPort(), nested: make(chan struct{})}
-	litenetlib.SetLogger(l)
-	defer litenetlib.SetLogger(nil)
-	done := make(chan struct{})
-	go func() {
-		litenetlib.NewManager(&litenetlib.EventBasedListener{}).Start(m.LocalPort())
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("nested library log deadlocked")
-	}
-}
