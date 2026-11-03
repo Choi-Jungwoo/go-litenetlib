@@ -147,10 +147,20 @@ func TestInteropServerDisconnect(t *testing.T) {
 	}
 }
 
+// awaitClientPeer gives the client time to register its peer before a reject. The v0.8.3
+// client sends its connect request from the NetPeer constructor, before TryAddPeer in
+// NetManager.Connect. A reject arriving in between is dropped, and the rejects for its
+// resent requests carry the next connection number, which it ignores; a reference
+// server behaves the same.
+func awaitClientPeer() { time.Sleep(50 * time.Millisecond) }
+
 func TestInteropReject(t *testing.T) {
 	m := startServer(t, &litenetlib.EventBasedListener{
-		ConnectionRequest: func(r *litenetlib.ConnectionRequest) { r.Reject([]byte{5, 5}) },
-		PeerConnected:     func(*litenetlib.Peer) { t.Error("rejected peer connected") },
+		ConnectionRequest: func(r *litenetlib.ConnectionRequest) {
+			awaitClientPeer()
+			r.Reject([]byte{5, 5})
+		},
+		PeerConnected: func(*litenetlib.Peer) { t.Error("rejected peer connected") },
 	}, nil)
 	runClient(t, "reject", m.LocalPort())
 }
@@ -159,10 +169,14 @@ func TestInteropWrongKey(t *testing.T) {
 	results := make(chan litenetlib.ConnectionRequestResult, 1)
 	m := startServer(t, &litenetlib.EventBasedListener{
 		ConnectionRequest: func(r *litenetlib.ConnectionRequest) {
+			awaitClientPeer()
 			if r.AcceptIfKey("key") != nil {
 				t.Error("AcceptIfKey accepted a wrong key")
 			}
-			results <- r.Result()
+			select { // never block the poll goroutine, or a failure hangs the cleanup
+			case results <- r.Result():
+			default:
+			}
 		},
 	}, nil)
 	runClient(t, "wrong_key", m.LocalPort())

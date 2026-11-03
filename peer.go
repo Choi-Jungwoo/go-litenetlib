@@ -213,14 +213,14 @@ func (p *Peer) Manager() *Manager { return p.m }
 func (p *Peer) PacketsCountInReliableQueue() int {
 	p.queueMu.Lock()
 	defer p.queueMu.Unlock()
-	return len(p.reliableUnordered.queue)
+	return len(p.reliableUnordered.queue) - p.reliableUnordered.queueHead
 }
 
 // PacketsCountInReliableOrderedQueue is the number of queued ReliableOrdered packets.
 func (p *Peer) PacketsCountInReliableOrderedQueue() int {
 	p.queueMu.Lock()
 	defer p.queueMu.Unlock()
-	return len(p.reliableOrdered.queue)
+	return len(p.reliableOrdered.queue) - p.reliableOrdered.queueHead
 }
 
 // Statistics returns a snapshot of the connection counters.
@@ -671,7 +671,8 @@ func (p *Peer) flushLocked() {
 		p.sendUserData(pk)
 		p.m.pool.recycle(pk)
 	}
-	p.unreliableQueue = dequeue(p.unreliableQueue, len(p.unreliableQueue))
+	clear(p.unreliableQueue)
+	p.unreliableQueue = p.unreliableQueue[:0]
 	p.queueMu.Unlock()
 	p.sendMerged()
 }

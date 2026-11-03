@@ -78,6 +78,33 @@ func BenchmarkSendFlushAckReliableOrdered(b *testing.B) {
 	}
 }
 
+// BenchmarkSendFlushAckReliableOrderedBacklog is the same with 4096 packets queued behind
+// the full window, so each ack moves one packet out of a long queue.
+func BenchmarkSendFlushAckReliableOrderedBacklog(b *testing.B) {
+	m, p := benchPeer(b)
+	data := make([]byte, 64)
+	for range 4096 {
+		if err := p.Send(data, ReliableOrdered); err != nil {
+			b.Fatal(err)
+		}
+	}
+	p.Flush()
+	ack := make([]byte, SequencedHeaderSize+DefaultWindowSize/8)
+	ack[0] = byte(propAckReliableOrdered)
+	b.ReportAllocs()
+	for i := range b.N {
+		if err := p.Send(data, ReliableOrdered); err != nil {
+			b.Fatal(err)
+		}
+		seq := i % MaxSequence
+		clear(ack[SequencedHeaderSize:])
+		binary.LittleEndian.PutUint16(ack[1:], uint16(seq))
+		ack[SequencedHeaderSize+(seq%DefaultWindowSize)/8] = 1 << (seq % 8)
+		m.dataReceived(ack, p.addr)
+		p.Flush()
+	}
+}
+
 func BenchmarkSendFragmented(b *testing.B) {
 	_, p := benchPeer(b)
 	data := make([]byte, 16*1024)
@@ -137,6 +164,28 @@ func BenchmarkLoopbackSendUnreliable(b *testing.B) {
 }
 
 // BenchmarkParallelSendFlush sends from many goroutines to distinct peers sharing one manager pool.
+// BenchmarkLoopbackParallelSendUnreliable sends from many goroutines through one socket.
+func BenchmarkLoopbackParallelSendUnreliable(b *testing.B) {
+	m := NewManager(&EventBasedListener{})
+	if err := m.Start(0); err != nil {
+		b.Fatal(err)
+	}
+	defer m.Stop(false)
+	sink, err := listenUDP("udp4", netip.MustParseAddrPort("127.0.0.1:0"), false)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer sink.Close()
+	sinkAddr := netip.MustParseAddrPort(sink.LocalAddr().String())
+	data := make([]byte, 64)
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			m.SendUnconnectedMessage(data, sinkAddr)
+		}
+	})
+}
+
 func BenchmarkParallelSendFlush(b *testing.B) {
 	m := NewManager(&EventBasedListener{})
 	var next atomic.Int32

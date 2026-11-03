@@ -7,7 +7,6 @@ import (
 	"math"
 	"net"
 	"net/netip"
-	"sync"
 	"time"
 )
 
@@ -145,7 +144,7 @@ type NtpRequest struct {
 	onComplete func(*NtpPacket)
 	conn4      *net.UDPConn
 	conn6      *net.UDPConn
-	wg         sync.WaitGroup
+	workers    group
 }
 
 // NewNtpRequest opens the sockets for querying server.
@@ -159,8 +158,7 @@ func NewNtpRequest(server netip.AddrPort, onComplete func(*NtpPacket)) (*NtpRequ
 	r.conn6, _ = listenUDP("udp6", netip.AddrPortFrom(netip.IPv6Unspecified(), port), false)
 	for _, c := range []*net.UDPConn{r.conn4, r.conn6} {
 		if c != nil {
-			r.wg.Add(1)
-			go r.receive(c)
+			r.workers.Go(func() { r.receive(c) })
 		}
 	}
 	return r, nil
@@ -193,11 +191,10 @@ func (r *NtpRequest) Close() {
 	if r.conn6 != nil {
 		r.conn6.Close()
 	}
-	r.wg.Wait()
+	r.workers.Wait()
 }
 
 func (r *NtpRequest) receive(conn *net.UDPConn) {
-	defer r.wg.Done()
 	buf := make([]byte, maxPacketSize)
 	for {
 		n, from, err := conn.ReadFromUDPAddrPort(buf)

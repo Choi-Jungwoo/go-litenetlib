@@ -59,8 +59,19 @@ func resolveFamily(host, network string) (netip.Addr, bool) {
 
 // MakeEndPoint resolves host and pairs it with port.
 func MakeEndPoint(host string, port int) (netip.AddrPort, error) {
+	if err := checkPort(port); err != nil {
+		return netip.AddrPort{}, err
+	}
 	addr, err := ResolveAddress(host)
 	return netip.AddrPortFrom(addr, uint16(port)), err
+}
+
+// checkPort rejects ports outside 0..65535, as the reference's IPEndPoint constructor does.
+func checkPort(port int) error {
+	if port < 0 || port > 0xFFFF {
+		return fmt.Errorf("litenetlib: port %d out of range", port)
+	}
+	return nil
 }
 
 // GetLocalIPList returns the local addresses of the requested families (NetUtils.GetLocalIpList):

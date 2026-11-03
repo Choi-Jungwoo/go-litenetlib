@@ -58,12 +58,10 @@ type Manager struct {
 	pool     packetPool
 
 	runMu     sync.Mutex
-	running   atomic.Bool
 	localPort atomic.Int32
-	conn4     *net.UDPConn
-	conn6     *net.UDPConn
+	socks     atomic.Pointer[sockets] // nil while stopped
 	stop      chan struct{}
-	wg        sync.WaitGroup
+	workers   *group // goroutines of the current session only
 
 	peersMu    sync.RWMutex
 	peers      map[netip.AddrPort]*Peer
@@ -107,7 +105,7 @@ func NewManager(listener EventListener) *Manager {
 }
 
 // IsRunning reports whether the socket is listening and the logic loop runs.
-func (m *Manager) IsRunning() bool { return m.running.Load() }
+func (m *Manager) IsRunning() bool { return m.socks.Load() != nil }
 
 // LocalPort is the bound UDP port.
 func (m *Manager) LocalPort() int { return int(m.localPort.Load()) }
@@ -121,8 +119,11 @@ func (m *Manager) Start(port int) error {
 func (m *Manager) StartAddr(addr4, addr6 netip.Addr, port int) error {
 	m.runMu.Lock()
 	defer m.runMu.Unlock()
-	if m.running.Load() {
+	if m.IsRunning() {
 		return ErrAlreadyRunning
+	}
+	if err := checkPort(port); err != nil {
+		return err
 	}
 	conn4, err := listenUDP("udp4", netip.AddrPortFrom(addr4, uint16(port)), m.ReuseAddress)
 	if err != nil {
@@ -132,21 +133,19 @@ func (m *Manager) StartAddr(addr4, addr6 netip.Addr, port int) error {
 	localPort := uint16(conn4.LocalAddr().(*net.UDPAddr).Port)
 	conn6, _ := listenUDP("udp6", netip.AddrPortFrom(addr6, localPort), m.ReuseAddress)
 
-	m.conn4, m.conn6 = conn4, conn6
 	m.localPort.Store(int32(localPort))
 	m.stop = make(chan struct{})
 	m.eventSignal = make(chan struct{}, 1)
-	m.running.Store(true)
+	m.socks.Store(&sockets{v4: conn4, v6: conn6})
+	m.workers = &group{}
 	if m.UnsyncedEvents {
-		m.wg.Add(1)
-		go m.dispatchEvents()
+		stop, signal := m.stop, m.eventSignal
+		m.workers.Go(func() { m.dispatchEvents(stop, signal) })
 	}
-	m.wg.Add(2)
-	go m.receiveLoop(conn4)
-	go m.updateLogic()
+	m.workers.Go(func() { m.receiveLoop(conn4) })
+	m.workers.Go(m.updateLogic)
 	if conn6 != nil {
-		m.wg.Add(1)
-		go m.receiveLoop(conn6)
+		m.workers.Go(func() { m.receiveLoop(conn6) })
 	}
 	return nil
 }
@@ -156,7 +155,7 @@ func (m *Manager) StartAddr(addr4, addr6 netip.Addr, port int) error {
 func (m *Manager) Stop(sendDisconnectMessages bool) {
 	m.runMu.Lock()
 	defer m.runMu.Unlock()
-	if !m.running.Load() {
+	if !m.IsRunning() {
 		return
 	}
 	for _, p := range m.snapshotPeers(nil) {
@@ -164,13 +163,13 @@ func (m *Manager) Stop(sendDisconnectMessages bool) {
 		p.shutdown(nil, !sendDisconnectMessages)
 		p.mu.Unlock()
 	}
-	m.running.Store(false)
+	s := m.socks.Swap(nil)
 	close(m.stop)
-	m.conn4.Close()
-	if m.conn6 != nil {
-		m.conn6.Close()
+	s.v4.Close()
+	if s.v6 != nil {
+		s.v6.Close()
 	}
-	m.wg.Wait()
+	m.workers.Wait()
 
 	m.peersMu.Lock()
 	m.headPeer = nil
@@ -317,14 +316,11 @@ const noDisconnect DisconnectReason = 0xFF
 // sendRaw writes one datagram. It never takes peer locks; the caller handles the returned
 // disconnect reason (noDisconnect when the peer should stay).
 func (m *Manager) sendRaw(data []byte, addr netip.AddrPort) (int, DisconnectReason, error) {
-	if !m.running.Load() {
+	s := m.socks.Load()
+	if s == nil {
 		return 0, noDisconnect, nil
 	}
-	conn := m.conn4
-	if m.conn6 != nil && addr.Addr().Is6() && !addr.Addr().Is4In6() {
-		conn = m.conn6
-	}
-	n, err := conn.WriteToUDPAddrPort(data, addr)
+	n, err := s.writeTo(data, addr)
 	if err != nil {
 		switch {
 		case errors.Is(err, errMessageSize):
@@ -447,20 +443,19 @@ func (m *Manager) SendDiscoveryResponse(data []byte, addr netip.AddrPort) bool {
 }
 
 func (m *Manager) sendUnconnected(prop packetProperty, data []byte, addr netip.AddrPort) bool {
-	if !m.running.Load() {
+	if !m.IsRunning() {
 		return false
 	}
 	return m.sendAndRecycle(m.pool.getWithData(prop, data), addr) > 0
 }
 
 func (m *Manager) updateLogic() {
-	defer m.wg.Done()
 	var peers []*Peer
 	var toRemove []*Peer
 	timer := time.NewTimer(0)
 	<-timer.C
 	last := time.Now()
-	for m.running.Load() {
+	for m.IsRunning() {
 		if debugBuild && m.SimulateLatency {
 			m.releaseDelayed()
 		}
@@ -506,7 +501,6 @@ func (m *Manager) updateLogic() {
 }
 
 func (m *Manager) receiveLoop(conn *net.UDPConn) {
-	defer m.wg.Done()
 	// One spare byte detects datagrams above the reference receive buffer size.
 	buf := make([]byte, maxPacketSize+1)
 	for {

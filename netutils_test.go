@@ -139,3 +139,16 @@ func TestGetLocalIPListUsesGatewayInterfaces(t *testing.T) {
 		t.Fatalf("GetLocalIPList(IPv4) = %v, want addresses of gateway interfaces %v (gateways: %v)", got, want, gateways)
 	}
 }
+
+func TestOutOfRangePortIsRejected(t *testing.T) {
+	for _, port := range []int{-1, 65536} {
+		if _, err := litenetlib.MakeEndPoint("127.0.0.1", port); err == nil {
+			t.Errorf("MakeEndPoint accepted port %d", port)
+		}
+		m := litenetlib.NewManager(&litenetlib.EventBasedListener{})
+		if err := m.Start(port); err == nil {
+			m.Stop(false)
+			t.Errorf("Start accepted port %d", port)
+		}
+	}
+}

@@ -94,3 +94,80 @@ func TestNtpRequestRejectsKissOfDeath(t *testing.T) {
 		t.Fatal("stratum 0 (kiss-o'-death) reply accepted")
 	}
 }
+
+func TestNtpRequestCloseFromCallback(t *testing.T) {
+	server := fakeNtpServer(t, func(req []byte) []byte { return ntpReply(req, 1) })
+	closed := make(chan struct{})
+	requests := make(chan *litenetlib.NtpRequest, 1)
+	req, err := litenetlib.NewNtpRequest(server, func(*litenetlib.NtpPacket) {
+		(<-requests).Close()
+		close(closed)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests <- req
+	req.Send()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close called from the callback did not return")
+	}
+}
+
+func TestNtpRequestConcurrentCloseWaitsForCallback(t *testing.T) {
+	server := fakeNtpServer(t, func(req []byte) []byte { return ntpReply(req, 1) })
+	entered, release := make(chan struct{}), make(chan struct{})
+	req, err := litenetlib.NewNtpRequest(server, func(*litenetlib.NtpPacket) {
+		close(entered)
+		<-release
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Send()
+	<-entered
+	closed := make(chan struct{}, 2)
+	go func() { req.Close(); closed <- struct{}{} }()
+	time.Sleep(50 * time.Millisecond) // the first Close is now waiting for the callback
+	go func() { req.Close(); closed <- struct{}{} }()
+	select {
+	case <-closed:
+		t.Error("Close returned while the callback was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	for range 2 {
+		select {
+		case <-closed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Close did not return after the callback finished")
+		}
+	}
+}
+
+func TestNtpRequestCloseAfterCloseFromCallback(t *testing.T) {
+	server := fakeNtpServer(t, func(req []byte) []byte { return ntpReply(req, 1) })
+	requests := make(chan *litenetlib.NtpRequest, 1)
+	selfClosed, outerClosed := make(chan struct{}), make(chan struct{})
+	req, err := litenetlib.NewNtpRequest(server, func(*litenetlib.NtpPacket) {
+		(<-requests).Close()
+		close(selfClosed)
+		select { // the callback waits for the owner's own Close
+		case <-outerClosed:
+		case <-time.After(3 * time.Second):
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests <- req
+	req.Send()
+	<-selfClosed
+	go func() { req.Close(); close(outerClosed) }()
+	select {
+	case <-outerClosed:
+	case <-time.After(time.Second):
+		t.Fatal("Close waited for a callback that had already closed the request")
+	}
+}

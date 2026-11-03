@@ -66,7 +66,8 @@ func (w *DataWriter) PutString(v string) {
 }
 
 // PutStringMax writes at most maxLength UTF-16 code units of v. Like the reference, the
-// length prefix and the space reserved are those of the whole string (padded with zeros).
+// length prefix and the space reserved are those of the whole string. The reference leaves
+// whatever the buffer held in the unused space; this port writes zeros there.
 func (w *DataWriter) PutStringMax(v string, maxLength int) {
 	if v == "" {
 		w.PutInt(0)

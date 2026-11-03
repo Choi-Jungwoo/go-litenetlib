@@ -97,9 +97,7 @@ func (m *Manager) popEvent() *netEvent {
 	e := m.events[m.eventsHead]
 	m.events[m.eventsHead] = nil
 	m.eventsHead++
-	if m.eventsHead == len(m.events) {
-		m.events, m.eventsHead = m.events[:0], 0
-	}
+	m.events, m.eventsHead = compact(m.events, m.eventsHead)
 	return e
 }
 
@@ -113,18 +111,36 @@ func (m *Manager) PollEvents() {
 	}
 }
 
-func (m *Manager) dispatchEvents() {
-	defer m.wg.Done()
+// dispatchEvents serves one Start..Stop session. A callback may stop and restart the
+// manager, so it checks its own session's stop channel after every event and never
+// touches the next session's queue.
+func (m *Manager) dispatchEvents(stop, signal <-chan struct{}) {
 	for {
 		select {
-		case <-m.stop:
+		case <-stop:
 			return
-		case <-m.eventSignal:
-			for e := m.popEvent(); e != nil; e = m.popEvent() {
-				m.processEvent(e)
+		case <-signal:
+		}
+		for e := m.popEvent(); e != nil; e = m.popEvent() {
+			m.processUnsynced(e)
+			select {
+			case <-stop:
+				return
+			default:
 			}
 		}
 	}
+}
+
+// processUnsynced runs an event like the reference runs unsynced callbacks: inside the
+// receive thread's catch block, so a panicking callback is logged and dispatch goes on.
+func (m *Manager) processUnsynced(e *netEvent) {
+	defer func() {
+		if r := recover(); r != nil {
+			writeError("[NM] SocketReceiveThread error: %v", r)
+		}
+	}()
+	m.processEvent(e)
 }
 
 func (m *Manager) processEvent(e *netEvent) {

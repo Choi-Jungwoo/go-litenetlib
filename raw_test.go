@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"net"
 	"net/netip"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +23,7 @@ const (
 	pConnectRequest    = 8
 	pConnectAccept     = 9
 	pDisconnect        = 10
+	pUnconnected       = 11
 	pDiscoveryRequest  = 17
 	pDiscoveryResponse = 18
 	pMerged            = 19
@@ -301,6 +304,61 @@ func TestRawUnsyncedEventsDisconnectFromCallback(t *testing.T) {
 	}
 }
 
+func TestRawUnsyncedCallbackPanicIsRecovered(t *testing.T) {
+	got := make(chan byte, 2)
+	m := litenetlib.NewManager(&litenetlib.EventBasedListener{
+		NetworkReceiveUnconnected: func(_ netip.AddrPort, r *litenetlib.PacketReader, _ litenetlib.UnconnectedMessageType) {
+			b := r.GetByte()
+			if b == 1 {
+				panic("callback bug")
+			}
+			got <- b
+		},
+	})
+	m.UnsyncedEvents = true
+	m.UnconnectedMessagesEnabled = true
+	if err := m.Start(0); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop(true)
+	c := newRawClient(t, m.LocalPort())
+	c.send(pUnconnected, 1)
+	c.send(pUnconnected, 2)
+	select {
+	case b := <-got:
+		if b != 2 {
+			t.Fatalf("got message %d, want 2", b)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("event after the panicking callback was not delivered")
+	}
+}
+
+func TestRawStopFromUnsyncedCallback(t *testing.T) {
+	stopped := make(chan struct{})
+	var m *litenetlib.Manager
+	m = litenetlib.NewManager(&litenetlib.EventBasedListener{
+		NetworkReceiveUnconnected: func(netip.AddrPort, *litenetlib.PacketReader, litenetlib.UnconnectedMessageType) {
+			m.Stop(true)
+			close(stopped)
+		},
+	})
+	m.UnsyncedEvents = true
+	m.UnconnectedMessagesEnabled = true
+	if err := m.Start(0); err != nil {
+		t.Fatal(err)
+	}
+	newRawClient(t, m.LocalPort()).send(pUnconnected)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop called from a callback did not return")
+	}
+	if m.IsRunning() {
+		t.Fatal("manager still running")
+	}
+}
+
 func TestRawRestart(t *testing.T) {
 	m := litenetlib.NewManager(&litenetlib.EventBasedListener{})
 	if err := m.Start(0); err != nil {
@@ -319,6 +377,117 @@ func TestRawRestart(t *testing.T) {
 	if d := c.recv(time.Second); !bytes.Equal(d, []byte{pPeerNotFound}) {
 		t.Fatalf("restarted manager replied % x", d)
 	}
+}
+
+func TestRawRestartFromUnsyncedCallback(t *testing.T) {
+	const messages = 50
+	restarted := make(chan int, 1)
+	received := make(chan struct{}, messages)
+	var inCallback, overlaps atomic.Int32
+	var m *litenetlib.Manager
+	m = litenetlib.NewManager(&litenetlib.EventBasedListener{
+		NetworkReceiveUnconnected: func(_ netip.AddrPort, r *litenetlib.PacketReader, _ litenetlib.UnconnectedMessageType) {
+			if r.GetByte() == 0 { // first session: restart from inside the callback
+				m.Stop(true)
+				if err := m.Start(0); err != nil {
+					t.Error(err)
+				}
+				restarted <- m.LocalPort()
+				return
+			}
+			if inCallback.Add(1) > 1 {
+				overlaps.Add(1)
+			}
+			time.Sleep(time.Millisecond)
+			inCallback.Add(-1)
+			received <- struct{}{}
+		},
+	})
+	m.UnsyncedEvents = true
+	m.UnconnectedMessagesEnabled = true
+	if err := m.Start(0); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop(true)
+	newRawClient(t, m.LocalPort()).send(pUnconnected, 0)
+	c := newRawClient(t, <-restarted)
+	for range messages {
+		c.send(pUnconnected, 1)
+	}
+	for range messages {
+		select {
+		case <-received:
+		case <-time.After(2 * time.Second):
+			t.Fatal("messages of the restarted session were lost")
+		}
+	}
+	if n := overlaps.Load(); n > 0 {
+		t.Fatalf("%d callbacks ran concurrently with another one", n)
+	}
+}
+
+func TestRawStopDoesNotWaitForPreviousSessionCallback(t *testing.T) {
+	restarted := make(chan int, 1)
+	newSessionStopped := make(chan struct{})
+	var m *litenetlib.Manager
+	m = litenetlib.NewManager(&litenetlib.EventBasedListener{
+		NetworkReceiveUnconnected: func(_ netip.AddrPort, r *litenetlib.PacketReader, _ litenetlib.UnconnectedMessageType) {
+			if r.GetByte() == 0 { // first session: restart, then wait for the new session's callback
+				m.Stop(true)
+				if err := m.Start(0); err != nil {
+					t.Error(err)
+				}
+				restarted <- m.LocalPort()
+				select {
+				case <-newSessionStopped:
+				case <-time.After(3 * time.Second):
+				}
+				return
+			}
+			m.Stop(true)
+			close(newSessionStopped)
+		},
+	})
+	m.UnsyncedEvents = true
+	m.UnconnectedMessagesEnabled = true
+	if err := m.Start(0); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop(true)
+	newRawClient(t, m.LocalPort()).send(pUnconnected, 0)
+	newRawClient(t, <-restarted).send(pUnconnected, 1)
+	select {
+	case <-newSessionStopped:
+	case <-time.After(time.Second):
+		t.Fatal("Stop in the new session waited for the previous session's callback")
+	}
+}
+
+func TestRawSendDuringRestart(t *testing.T) {
+	m := litenetlib.NewManager(&litenetlib.EventBasedListener{})
+	if err := m.Start(0); err != nil {
+		t.Fatal(err)
+	}
+	c := newRawClient(t, m.LocalPort())
+	to := c.conn.LocalAddr().(*net.UDPAddr).AddrPort()
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for !stop.Load() {
+				m.SendUnconnectedMessage([]byte{1}, to)
+			}
+		})
+	}
+	for range 200 {
+		m.Stop(true)
+		if err := m.Start(0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stop.Store(true)
+	wg.Wait()
+	m.Stop(true)
 }
 
 func TestRawSmallAPI(t *testing.T) {

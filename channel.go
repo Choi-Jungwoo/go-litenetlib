@@ -17,6 +17,7 @@ type pendingPacket struct {
 type reliableChannel struct {
 	peer         *Peer
 	queue        []*packet
+	queueHead    int // queue[:queueHead] is already sent
 	outgoingAcks *packet
 	pending      [DefaultWindowSize]pendingPacket
 	received     [DefaultWindowSize]*packet // ordered
@@ -79,16 +80,16 @@ func (c *reliableChannel) sendNextPackets() {
 
 	now := time.Now()
 	c.peer.queueMu.Lock()
-	n := 0
-	for n < len(c.queue) && relativeSequenceNumber(c.localSequence, c.localWindowStart) < DefaultWindowSize {
+	for c.queueHead < len(c.queue) && relativeSequenceNumber(c.localSequence, c.localWindowStart) < DefaultWindowSize {
 		pp := &c.pending[c.localSequence%DefaultWindowSize]
 		pp.sent = false
-		pp.packet = c.queue[n]
+		pp.packet = c.queue[c.queueHead]
 		pp.packet.setSequence(uint16(c.localSequence))
 		c.localSequence = (c.localSequence + 1) % MaxSequence
-		n++
+		c.queue[c.queueHead] = nil
+		c.queueHead++
 	}
-	c.queue = dequeue(c.queue, n)
+	c.queue, c.queueHead = compact(c.queue, c.queueHead)
 	c.peer.queueMu.Unlock()
 
 	resendDelay := time.Duration(c.peer.resendDelay * float64(time.Millisecond))
@@ -208,7 +209,8 @@ func (c *sequencedChannel) sendNextPackets() {
 				c.peer.m.pool.recycle(p)
 			}
 		}
-		c.queue = dequeue(c.queue, len(c.queue))
+		clear(c.queue)
+		c.queue = c.queue[:0]
 	}
 	c.peer.queueMu.Unlock()
 
@@ -235,9 +237,17 @@ func (c *sequencedChannel) processPacket(p *packet) {
 	c.mustSendAck = true
 }
 
-// dequeue drops the first n packets of q, keeping its storage.
-func dequeue(q []*packet, n int) []*packet {
-	m := copy(q, q[n:])
-	clear(q[m:])
-	return q[:m]
+// compact drops the consumed prefix q[:head] of a FIFO slice, whose slots the consumer
+// has zeroed, once it is all of q or at least half of it. Pops stay amortized O(1) and
+// a queue that never drains does not grow its backing array forever.
+func compact[T any](q []T, head int) ([]T, int) {
+	if head == len(q) {
+		return q[:0], 0
+	}
+	if head*2 < len(q) {
+		return q, head
+	}
+	n := copy(q, q[head:])
+	clear(q[n:])
+	return q[:n], 0
 }
