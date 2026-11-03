@@ -59,8 +59,10 @@ func (r *DataReader) AvailableBytes() int { return r.dataSize - r.position }
 // Clear detaches the reader from its source.
 func (r *DataReader) Clear() { *r = DataReader{} }
 
+// next and peek cap the slice at dataSize so a short packet in a pooled buffer cannot
+// read stale bytes beyond its end.
 func (r *DataReader) next(n int) []byte {
-	b := r.data[r.position : r.position+n]
+	b := r.data[r.position : r.position+n : r.dataSize]
 	r.position += n
 	return b
 }
@@ -96,7 +98,7 @@ func (r *DataReader) GetStringMax(maxLength int) string {
 	if n <= 0 || n > maxLength*2 {
 		return ""
 	}
-	s := string(r.data[r.position : r.position+n])
+	s := string(r.data[r.position : r.position+n : r.dataSize])
 	if utf16Len(s) > maxLength {
 		return ""
 	}
@@ -150,7 +152,7 @@ func (r *DataReader) GetStringArrayMax(maxLength int) []string {
 	return getArray(r, func() string { return r.GetStringMax(maxLength) })
 }
 
-func (r *DataReader) peek(n int) []byte { return r.data[r.position : r.position+n] }
+func (r *DataReader) peek(n int) []byte { return r.data[r.position : r.position+n : r.dataSize] }
 
 func (r *DataReader) PeekByte() byte     { return r.peek(1)[0] }
 func (r *DataReader) PeekSByte() int8    { return int8(r.PeekByte()) }

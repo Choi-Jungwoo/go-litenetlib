@@ -359,6 +359,77 @@ func TestRawStopFromUnsyncedCallback(t *testing.T) {
 	}
 }
 
+// TestRawStopFromCallbackDuringStop: a callback calling Stop while another Stop waits for
+// that callback returns at once instead of deadlocking.
+func TestRawStopFromCallbackDuringStop(t *testing.T) {
+	entered := make(chan struct{})
+	var m *litenetlib.Manager
+	m = litenetlib.NewManager(&litenetlib.EventBasedListener{
+		NetworkReceiveUnconnected: func(netip.AddrPort, *litenetlib.PacketReader, litenetlib.UnconnectedMessageType) {
+			close(entered)
+			for m.IsRunning() { // wait for the outer Stop
+				time.Sleep(time.Millisecond)
+			}
+			m.Stop(true)
+		},
+	})
+	m.UnsyncedEvents = true
+	m.UnconnectedMessagesEnabled = true
+	if err := m.Start(0); err != nil {
+		t.Fatal(err)
+	}
+	newRawClient(t, m.LocalPort()).send(pUnconnected)
+	<-entered
+	stopped := make(chan struct{})
+	go func() {
+		m.Stop(true)
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop deadlocked with a callback calling Stop")
+	}
+}
+
+// TestRawInconsistentFragmentsDropped: parts that do not tile the result are dropped, and a
+// later well-formed fragmented packet is still delivered.
+func TestRawInconsistentFragmentsDropped(t *testing.T) {
+	got := make(chan string, 4)
+	m := startServer(t, &litenetlib.EventBasedListener{
+		ConnectionRequest: acceptKey,
+		NetworkReceive: func(_ *litenetlib.Peer, r *litenetlib.PacketReader, _ litenetlib.DeliveryMethod) {
+			got <- string(r.GetRemainingBytes())
+			r.Recycle()
+		},
+	}, nil)
+	c := newRawClient(t, m.LocalPort())
+	c.send(connectRequest(7, 42, 0, "key")...)
+	c.expect(pConnectAccept)
+
+	seq := uint16(0)
+	sendFragments := func(id uint16, parts ...string) {
+		for i, part := range parts {
+			b := []byte{pReliableOrdered | 0x80}
+			for _, v := range []uint16{seq, id, uint16(i), uint16(len(parts))} {
+				b = binary.LittleEndian.AppendUint16(b, v)
+			}
+			c.send(append(b, part...)...)
+			seq++
+		}
+	}
+	sendFragments(1, "abcde", "f", "g")
+	sendFragments(2, "ab", "cd", "e")
+	select {
+	case s := <-got:
+		if s != "abcde" {
+			t.Fatalf("got %q, want the well-formed packet", s)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("well-formed fragmented packet not delivered")
+	}
+}
+
 func TestRawRestart(t *testing.T) {
 	m := litenetlib.NewManager(&litenetlib.EventBasedListener{})
 	if err := m.Start(0); err != nil {

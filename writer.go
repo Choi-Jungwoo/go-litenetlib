@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"math"
 	"net/netip"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -73,6 +74,9 @@ func (w *DataWriter) PutStringMax(v string, maxLength int) {
 		w.PutInt(0)
 		return
 	}
+	// A .NET string always encodes to valid UTF-8; mirror its U+FFFD replacement so the
+	// encoded prefix never outgrows len(v).
+	v = strings.ToValidUTF8(v, string(utf8.RuneError))
 	w.PutInt(int32(len(v)))
 	start := len(w.data)
 	units := 0

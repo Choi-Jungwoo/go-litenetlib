@@ -7,8 +7,18 @@ import "syscall"
 // configureSocket applies the NetSocket.BindSocket options.
 func configureSocket(network string, fd uintptr, reuseAddress bool) {
 	s := syscall.Handle(fd)
+	// ExclusiveAddressUse = !reuseAddress, then ReuseAddress = reuseAddress.
+	const soExclusiveAddrUse = ^syscall.SO_REUSEADDR // SO_EXCLUSIVEADDRUSE
+	exclusive, reuse := 1, 0
 	if reuseAddress {
-		_ = syscall.SetsockoptInt(s, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+		exclusive, reuse = 0, 1
+	}
+	err := syscall.SetsockoptInt(s, syscall.SOL_SOCKET, soExclusiveAddrUse, exclusive)
+	if err == nil {
+		err = syscall.SetsockoptInt(s, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, reuse)
+	}
+	if err != nil {
+		writeError("IL2CPP SetSocketOption error")
 	}
 	if network == "udp4" {
 		const ipDontFragment = 14

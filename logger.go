@@ -2,6 +2,7 @@ package litenetlib
 
 import (
 	"log"
+	"sync"
 	"sync/atomic"
 )
 
@@ -22,13 +23,27 @@ type NetLogger interface {
 
 type loggerHolder struct{ NetLogger }
 
-var logger atomic.Pointer[loggerHolder]
+var (
+	logger atomic.Pointer[loggerHolder]
+	// loggerMu serializes WriteNet calls like NetDebug's DebugLogLock; loggerOwner makes it
+	// reentrant like a C# lock, so a WriteNet that triggers another library log cannot deadlock.
+	loggerMu    sync.Mutex
+	loggerOwner atomic.Uint64
+)
 
 // SetLogger routes library messages to l; nil restores the default (standard log package).
 // Like the reference release build, only errors are written.
 func SetLogger(l NetLogger) { logger.Store(&loggerHolder{l}) }
 
 func writeError(format string, args ...any) {
+	if id := goid(); loggerOwner.Load() != id {
+		loggerMu.Lock()
+		loggerOwner.Store(id)
+		defer func() {
+			loggerOwner.Store(0)
+			loggerMu.Unlock()
+		}()
+	}
 	if h := logger.Load(); h != nil && h.NetLogger != nil {
 		h.WriteNet(NetLogError, format, args...)
 		return

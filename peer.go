@@ -429,17 +429,30 @@ func (p *Peer) addIncomingPacket(pk *packet) {
 		return
 	}
 
-	result := p.m.pool.getWithProperty(pk.property(), inc.totalSize)
-	offset := result.headerSize()
+	delete(p.holdedFragments, id)
+	// Parts are placed at firstSize*i, so every part but the last must be firstSize long.
+	// The reference throws on some mismatches and delivers misplaced bytes on others; drop them all.
 	firstSize := len(inc.fragments[0].data) - dataOffset
-	for i, f := range inc.fragments {
-		// Inconsistent fragment sizes panic here like Buffer.BlockCopy throws in the reference.
-		copy(result.data[offset+firstSize*i:offset+firstSize*i+len(f.data)-dataOffset], f.data[dataOffset:])
+	valid := true
+	for _, f := range inc.fragments[:len(inc.fragments)-1] {
+		valid = valid && len(f.data)-dataOffset == firstSize
+	}
+	var result *packet
+	if valid {
+		result = p.m.pool.getWithProperty(pk.property(), inc.totalSize)
+		offset := result.headerSize()
+		for i, f := range inc.fragments {
+			copy(result.data[offset+firstSize*i:], f.data[dataOffset:])
+		}
+	}
+	for _, f := range inc.fragments {
 		p.m.pool.recycle(f)
-		inc.fragments[i] = nil
+	}
+	if result == nil {
+		writeError("Invalid fragment sizes")
+		return
 	}
 	p.m.receiveFromPeer(p, result)
-	delete(p.holdedFragments, id)
 }
 
 func (p *Peer) processMtuPacket(pk *packet) {

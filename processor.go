@@ -59,10 +59,11 @@ func PacketHash(typeName string) uint64 {
 }
 
 // RegisterNestedType registers custom serialization for fields of type T. It reports false if T
-// already has a codec.
+// already has a codec or is a primitive (NetSerializer.BasicTypes). Codecs for slices of
+// primitives are accepted but, as in the reference, the built-in array format wins.
 func RegisterNestedType[T any](pp *PacketProcessor, write func(w *DataWriter, v T), read func(r *DataReader) T) bool {
 	t := reflect.TypeFor[T]()
-	if _, ok := pp.nested[t]; ok {
+	if _, ok := pp.nested[t]; ok || primitive(t) {
 		return false
 	}
 	pp.nested[t] = codec{
@@ -197,8 +198,24 @@ func (pp *PacketProcessor) register(t reflect.Type) ([]fieldCodec, error) {
 
 var serializableType = reflect.TypeFor[Serializable]()
 
+// primitive reports whether t is a predeclared type that maps to a C# primitive. NetSerializer
+// handles primitives and their arrays before registered nested types; named types map to C#
+// enums and structs.
+func primitive(t reflect.Type) bool {
+	if t.Name() == "" || t.PkgPath() != "" {
+		return false
+	}
+	switch t.Kind() {
+	case reflect.Bool, reflect.Uint8, reflect.Int8, reflect.Int16, reflect.Uint16, reflect.Int32,
+		reflect.Uint32, reflect.Int64, reflect.Uint64, reflect.Float32, reflect.Float64, reflect.String:
+		return true
+	}
+	return false
+}
+
 func (pp *PacketProcessor) codecFor(t reflect.Type) (codec, error) {
-	if c, ok := pp.nested[t]; ok {
+	builtin := primitive(t) || t.Kind() == reflect.Slice && t.Name() == "" && primitive(t.Elem())
+	if c, ok := pp.nested[t]; ok && !builtin {
 		return c, nil
 	}
 	if reflect.PointerTo(t).Implements(serializableType) {
@@ -262,7 +279,7 @@ func (pp *PacketProcessor) codecFor(t reflect.Type) (codec, error) {
 			func(w *DataWriter, v reflect.Value) { w.PutString(v.String()) },
 			func(r *DataReader, v reflect.Value) { v.SetString(r.GetString()) }}, nil
 	case reflect.Slice:
-		if t.Elem().Kind() == reflect.Uint8 { // byte[] is length-prefixed with an int32
+		if t.Elem() == reflect.TypeFor[byte]() { // byte[] is length-prefixed with an int32
 			return codec{
 				func(w *DataWriter, v reflect.Value) { w.PutBytesWithLength(v.Bytes()) },
 				func(r *DataReader, v reflect.Value) { v.SetBytes(r.GetBytesWithLength()) }}, nil

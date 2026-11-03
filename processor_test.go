@@ -140,3 +140,44 @@ func TestPacketProcessorSend(t *testing.T) {
 		}
 	}
 }
+
+// TestPacketProcessorNestedTypePrecedence follows NetSerializer.RegisterInternal: primitives and
+// their arrays use the built-in format before registered nested types, and a registered element
+// type is serialized as a ushort-counted array of that codec.
+func TestPacketProcessorNestedTypePrecedence(t *testing.T) {
+	pp := litenetlib.NewPacketProcessor(0)
+	if litenetlib.RegisterNestedType(pp, func(*litenetlib.DataWriter, int32) {}, func(*litenetlib.DataReader) int32 { return 0 }) {
+		t.Fatal("registered a codec for a primitive (NetSerializer.BasicTypes)")
+	}
+	litenetlib.RegisterNestedType(pp,
+		func(w *litenetlib.DataWriter, v []int32) { w.PutByte(0xEE) },
+		func(*litenetlib.DataReader) []int32 { return nil })
+	litenetlib.RegisterNestedType(pp,
+		func(w *litenetlib.DataWriter, c color) { w.PutShort(int16(c)) },
+		func(r *litenetlib.DataReader) color { return color(r.GetShort()) })
+
+	type ints []int32 // a named slice maps to a custom C# type, so its codec applies
+	litenetlib.RegisterNestedType(pp,
+		func(w *litenetlib.DataWriter, v ints) { w.PutByte(0xAB) },
+		func(*litenetlib.DataReader) ints { return nil })
+
+	type pkt struct {
+		Numbers []int32
+		Colors  []color
+		Custom  ints
+	}
+	w := litenetlib.NewDataWriter()
+	if err := litenetlib.Write(pp, w, "P", &pkt{[]int32{1}, []color{2, 3}, ints{4}}); err != nil {
+		t.Fatal(err)
+	}
+	want := litenetlib.NewDataWriter()
+	want.PutULong(litenetlib.PacketHash("P"))
+	want.PutIntArray([]int32{1})
+	want.PutUShort(2)
+	want.PutShort(2)
+	want.PutShort(3)
+	want.PutByte(0xAB)
+	if !slices.Equal(w.Data(), want.Data()) {
+		t.Fatalf("got % x, want % x", w.Data(), want.Data())
+	}
+}

@@ -58,6 +58,7 @@ type Manager struct {
 	pool     packetPool
 
 	runMu     sync.Mutex
+	stopping  atomic.Bool // a Stop is in progress
 	localPort atomic.Int32
 	socks     atomic.Pointer[sockets] // nil while stopped
 	stop      chan struct{}
@@ -153,8 +154,14 @@ func (m *Manager) StartAddr(addr4, addr6 netip.Addr, port int) error {
 // Stop closes all connections and stops the manager. With sendDisconnectMessages the
 // peers are told about the shutdown; no disconnect events are raised either way.
 func (m *Manager) Stop(sendDisconnectMessages bool) {
+	// A Stop during another Stop returns at once, like the reference once IsRunning is false;
+	// waiting for runMu would deadlock a callback that the outer Stop is waiting for.
+	if !m.stopping.CompareAndSwap(false, true) {
+		return
+	}
 	m.runMu.Lock()
 	defer m.runMu.Unlock()
+	defer m.stopping.Store(false) // before Unlock, so a Start that follows sees it cleared
 	if !m.IsRunning() {
 		return
 	}
