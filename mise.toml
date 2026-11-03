@@ -1,5 +1,7 @@
 [tools]
 go = "1.27.2"
+# Builds the LiteNetLib v0.8.3 interop client used by the tests.
+dotnet = "10.0.400"
 
 [tasks.fmt]
 run = "gofmt -l -w ."
@@ -9,3 +11,6 @@ run = "go vet ./..."
 
 [tasks.test]
 run = "go test -race ./..."
+
+[tasks.bench]
+run = "go test -run '^$' -bench . -benchmem ./..."

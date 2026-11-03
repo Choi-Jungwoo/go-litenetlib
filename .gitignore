@@ -29,3 +29,8 @@ mise.local.toml
 
 # Agent instructions
 AGENTS.md
+
+# Interop harness build output
+/interop/bin/
+/interop/client/obj/
+/interop/client/bin/

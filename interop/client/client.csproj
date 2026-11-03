@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Interop test client: compiles the unmodified LiteNetLib v0.8.3 sources. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS0618;CS0162;CS0168;CS0219;CS8632;SYSLIB0011;SYSLIB0014</NoWarn>
+    <!-- DEBUG enables the reference packet loss / latency simulation. -->
+    <DefineConstants>DEBUG;NETCORE</DefineConstants>
+    <LiteNetLibSrc Condition="'$(LITENETLIB_SRC)' != ''">$(LITENETLIB_SRC)</LiteNetLibSrc>
+    <LiteNetLibSrc Condition="'$(LITENETLIB_SRC)' == ''">$(HOME)/Code/LiteNetLib/LiteNetLib</LiteNetLibSrc>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="$(LiteNetLibSrc)/*.cs" />
+    <Compile Include="$(LiteNetLibSrc)/Utils/*.cs" />
+  </ItemGroup>
+</Project>
